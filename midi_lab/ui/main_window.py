@@ -646,9 +646,17 @@ class MainWindow(QMainWindow):
         except Exception:
             self._chord_list.addItem("（表記を解釈できません）")
             return
-        for s in targeted_chord_suggestions(el, self._detected_key):
-            self._chord_list.addItem(s)
         prev = melody_midi_from_previous(labels, self._row_ql, r)
+        for s in targeted_chord_suggestions(
+            el,
+            self._detected_key,
+            label=it.text(),
+            labels=labels,
+            row_ql=self._row_ql,
+            row=r,
+            melody_midi=prev,
+        ):
+            self._chord_list.addItem(s)
         harm = harmony_chord_for_melody_at_row(labels, self._row_ql, r, self._detected_key)
         for line in melodic_note_candidates(prev, harm, self._detected_key):
             self._melody_list.addItem(line)

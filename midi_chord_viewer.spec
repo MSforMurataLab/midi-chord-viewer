@@ -35,6 +35,7 @@ a = Analysis(
         "midi_lab.resources",
         "midi_lab.core",
         "midi_lab.core.harmony",
+        "midi_lab.core.chord_rules",
         "midi_lab.core.score",
         "midi_lab.core.playback",
         "midi_lab.core.plotting",

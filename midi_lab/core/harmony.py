@@ -2,6 +2,7 @@
 """和声解析・コード／メロディ候補生成。"""
 from __future__ import annotations
 
+import copy
 import re
 
 from music21 import chord as m21_chord
@@ -9,8 +10,228 @@ from music21 import harmony
 from music21 import key as m21_key
 from music21 import note as m21_note
 from music21 import pitch as m21_pitch
-from music21 import roman
-from music21.roman import romanNumeralFromChord
+from midi_lab.core.chord_rules import (
+    chord_spec_from_element,
+    key_from_music21,
+    rule_based_chord_suggestions,
+)
+
+_UNIDENTIFIED_RE = re.compile(r"cannot be identified", re.I)
+
+# (ルートからの半音集合, サフィックス, 優先度) — music21 失敗時のテンプレート照合
+_CHORD_TEMPLATES: list[tuple[frozenset[int], str, int]] = [
+    (frozenset({7}), "5", 8),
+    (frozenset({4, 7}), "", 24),
+    (frozenset({3, 7}), "m", 24),
+    (frozenset({3, 6}), "dim", 20),
+    (frozenset({4, 8}), "+", 18),
+    (frozenset({2, 7}), "sus2", 19),
+    (frozenset({5, 7}), "sus4", 19),
+    (frozenset({4, 7, 11}), "maj7", 26),
+    (frozenset({4, 7, 10}), "7", 26),
+    (frozenset({3, 7, 10}), "m7", 26),
+    (frozenset({3, 7, 11}), "mM7", 22),
+    (frozenset({3, 6, 10}), "m7b5", 25),
+    (frozenset({3, 6, 9}), "dim7", 22),
+    (frozenset({4, 7, 10, 2}), "9", 23),
+    (frozenset({3, 7, 10, 2}), "m9", 22),
+    (frozenset({4, 7, 11, 2}), "maj9", 21),
+    (frozenset({4, 7, 10, 5}), "11", 20),
+    (frozenset({4, 7, 10, 2, 9}), "13", 19),
+    (frozenset({3, 7, 10, 5}), "m11", 18),
+    (frozenset({4, 7, 10, 5, 2}), "13", 18),
+    (frozenset({4, 11}), "maj7", 23),
+    (frozenset({4, 10}), "7", 23),
+    (frozenset({3, 10}), "m7", 23),
+    (frozenset({3, 11}), "mM7", 21),
+    (frozenset({2, 4}), "sus2", 14),
+]
+
+
+def _is_bad_figure(fig: str | None) -> bool:
+    if not fig or not str(fig).strip():
+        return True
+    return bool(_UNIDENTIFIED_RE.search(str(fig)))
+
+
+def _chord_has_third(ch: m21_chord.Chord) -> bool:
+    pcs = {p.pitchClass for p in ch.pitches}
+    for a in pcs:
+        for b in pcs:
+            if a == b:
+                continue
+            if (b - a) % 12 in (3, 4):
+                return True
+    return False
+
+
+def _accept_music21_figure(ch: m21_chord.Chord, fig: str) -> bool:
+    if _is_bad_figure(fig):
+        return False
+    # 3度を含むのに power / 5 だけの記号は誤判定になりやすい
+    if _chord_has_third(ch) and re.search(r"(^|[^a-z])5|power", fig, re.I):
+        return False
+    return True
+
+
+def _normalize_figure(fig: str) -> str:
+    s = str(fig).strip()
+    s = s.replace("power", "5")
+    s = s.replace("Maj", "maj").replace("Ma7", "maj7")
+    return s
+
+
+def _intervals_from_root(pcs: set[int], root_pc: int) -> frozenset[int]:
+    return frozenset((pc - root_pc) % 12 for pc in pcs if pc != root_pc)
+
+
+def _pitch_name_at_interval(root: m21_pitch.Pitch, semitones: int) -> str:
+    p = m21_pitch.Pitch(root.midi + semitones)
+    return p.name
+
+
+def _format_additions(root: m21_pitch.Pitch, extra: set[int]) -> str:
+    if not extra:
+        return ""
+    names: list[str] = []
+    for iv in sorted(extra):
+        try:
+            names.append(_pitch_name_at_interval(root, iv))
+        except Exception:
+            continue
+    if not names:
+        return ""
+    return "add" + ",".join(names)
+
+
+def _infer_figure_by_templates(ch: m21_chord.Chord) -> str | None:
+    pcs = {p.pitchClass for p in ch.pitches}
+    if len(pcs) < 2:
+        return None
+
+    bass = ch.bass()
+    bass_pc = bass.pitchClass
+    best_fig: str | None = None
+    best_score = -10_000
+
+    for root_pitch in ch.pitches:
+        root_pc = root_pitch.pitchClass
+        intervals = _intervals_from_root(pcs, root_pc)
+        if not intervals and len(pcs) == 1:
+            continue
+
+        for tmpl, suffix, priority in _CHORD_TEMPLATES:
+            if not tmpl.issubset(intervals):
+                continue
+            extra = set(intervals) - set(tmpl)
+            score = priority - len(extra) * 4
+            if root_pc == bass_pc:
+                score += 5
+            elif bass_pc in pcs:
+                score += 1
+            if len(extra) == 0:
+                score += 4
+            elif len(extra) <= 2:
+                score += 1
+
+            fig = root_pitch.name + suffix
+            if bass_pc != root_pc:
+                fig += "/" + bass.name
+            add_part = _format_additions(root_pitch, extra)
+            if add_part:
+                fig += add_part
+
+            if score > best_score:
+                best_score = score
+                best_fig = fig
+
+    return best_fig
+
+
+def _infer_figure_bass_add(ch: m21_chord.Chord) -> str:
+    """テンプレート不一致時 — 低音をルートに add 表記で構成音を列挙。"""
+    bass = ch.bass()
+    root_pc = bass.pitchClass
+    extras: set[int] = set()
+    for p in ch.pitches:
+        if p.pitchClass == root_pc and p.midi == bass.midi:
+            continue
+        iv = (p.pitchClass - root_pc) % 12
+        if iv:
+            extras.add(iv)
+    fig = bass.name
+    add_part = _format_additions(bass, extras)
+    if add_part:
+        return fig + add_part
+    if len({p.pitchClass for p in ch.pitches}) == 1:
+        return bass.nameWithOctave
+    names = sorted({p.name for p in ch.pitches if p.pitchClass != root_pc})
+    if names:
+        return fig + "add" + ",".join(names)
+    return fig
+
+
+def _music21_figure(ch: m21_chord.Chord) -> str | None:
+    try:
+        fig = harmony.chordSymbolFigureFromChord(ch)
+        if _accept_music21_figure(ch, str(fig)):
+            return _normalize_figure(fig)
+    except Exception:
+        pass
+    return None
+
+
+def _music21_figure_with_root_guesses(ch: m21_chord.Chord) -> str | None:
+    pitches = list(ch.pitches)
+    try_first = [ch.bass(), *sorted(pitches, key=lambda p: p.midi)]
+    seen: set[int] = set()
+    for root_pitch in try_first:
+        if root_pitch.midi in seen:
+            continue
+        seen.add(root_pitch.midi)
+        trial = m21_chord.Chord([copy.deepcopy(p) for p in pitches])
+        try:
+            trial.root(root_pitch)
+            fig = _music21_figure(trial)
+            if fig:
+                return fig
+        except Exception:
+            continue
+    return None
+
+
+def chord_figure_from_chord(ch: m21_chord.Chord, ky: m21_key.Key | None = None) -> str:
+    """構成音からコード記号を推定（music21 + テンプレート + add 表記）。"""
+    fig = _music21_figure(ch)
+    if fig:
+        return fig
+
+    fig = _infer_figure_by_templates(ch)
+    if fig:
+        return _normalize_figure(fig)
+
+    fig = _music21_figure_with_root_guesses(ch)
+    if fig:
+        return fig
+
+    # キー文脈でルート推定を再試行
+    if ky is not None:
+        try:
+            trial = copy.deepcopy(ch)
+            sc = ky.getScale()
+            scale_pcs = {p.pitchClass for p in sc.pitches}
+            chord_pcs = {p.pitchClass for p in ch.pitches}
+            for pc in chord_pcs:
+                if pc in scale_pcs:
+                    rp = next(p for p in ch.pitches if p.pitchClass == pc)
+                    trial.root(rp)
+                    fig = _music21_figure(trial) or _music21_figure_with_root_guesses(trial)
+                    if fig:
+                        return fig
+        except Exception:
+            pass
+
+    return _normalize_figure(_infer_figure_bass_add(ch))
 
 
 def event_display_label(el: m21_chord.Chord | m21_note.Note, ky: m21_key.Key | None = None) -> str:
@@ -18,24 +239,7 @@ def event_display_label(el: m21_chord.Chord | m21_note.Note, ky: m21_key.Key | N
     if isinstance(el, m21_note.Note):
         return el.nameWithOctave
     if isinstance(el, m21_chord.Chord):
-        try:
-            cs = harmony.chordSymbolFromChord(el)
-            fig = getattr(cs, "figure", None)
-            if fig:
-                return str(fig)
-        except Exception:
-            pass
-        if ky is not None:
-            try:
-                rn = romanNumeralFromChord(el, ky)
-                fig = getattr(rn, "figure", None)
-                if fig:
-                    return str(fig)
-            except Exception:
-                pass
-        name = el.pitchedCommonName or el.commonName
-        if name:
-            return str(name)
+        return chord_figure_from_chord(el, ky)
     return str(el)
 
 
@@ -77,53 +281,45 @@ def parse_chord_cell(text: str, ql: float) -> tuple[m21_chord.Chord | m21_note.N
         return n, (n.pitch.midi,)
 
 
-def targeted_chord_suggestions(el: m21_chord.Chord | m21_note.Note, ky: m21_key.Key | None) -> list[str]:
-    if ky is None:
+def targeted_chord_suggestions(
+    el: m21_chord.Chord | m21_note.Note,
+    ky: m21_key.Key | None,
+    *,
+    label: str = "",
+    labels: list[str] | None = None,
+    row_ql: list[float] | None = None,
+    row: int = 0,
+    melody_midi: int | None = None,
+) -> list[str]:
+    key = key_from_music21(ky)
+    if key is None:
         return ["キーが検出できません（候補は参考程度）"]
-    cand: list[str] = []
-    seen: set[str] = set()
 
-    def add(name: str | None) -> None:
-        if not name or name in seen:
-            return
-        seen.add(name)
-        cand.append(name)
+    figure = label.strip() if label else ""
+    if not figure and isinstance(el, m21_chord.Chord):
+        figure = chord_figure_from_chord(el, ky)
 
-    for lab in (
-        "I", "I7", "ii", "ii7", "iii", "iii7", "IV", "IVmaj7", "V", "V7",
-        "vi", "vi7", "viiø7", "bIII", "bVI", "bVII", "iv", "iiø7", "Ger+6", "It+6", "Fr+6",
-    ):
+    target = chord_spec_from_element(el, figure)
+
+    next_chord = None
+    if labels and row_ql is not None and 0 <= row < len(labels) - 1:
         try:
-            rn = roman.RomanNumeral(lab, ky)
-            if rn.chord:
-                add(rn.chord.pitchedCommonName)
+            nxt_label = labels[row + 1]
+            nxt_el, _ = parse_chord_cell(nxt_label, row_ql[row + 1])
+            nxt_fig = nxt_label if isinstance(nxt_el, m21_note.Note) else (
+                chord_figure_from_chord(nxt_el, ky) if isinstance(nxt_el, m21_chord.Chord) else nxt_label
+            )
+            next_chord = chord_spec_from_element(nxt_el, nxt_fig)
         except Exception:
-            continue
+            next_chord = None
 
-    if isinstance(el, m21_chord.Chord):
-        cur = el.pitchedCommonName
-        cand = [x for x in cand if x != cur]
-        try:
-            rn0 = romanNumeralFromChord(el, ky)
-            if "7" in str(rn0.figure) or str(rn0.figure) in ("V", "v"):
-                try:
-                    tr = roman.RomanNumeral("bII7", ky)
-                    if tr.chord:
-                        add(tr.chord.pitchedCommonName)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    else:
-        for lab in ("I", "IV", "V", "vi"):
-            try:
-                rn = roman.RomanNumeral(lab, ky)
-                if rn.chord:
-                    add(rn.chord.pitchedCommonName)
-            except Exception:
-                pass
-
-    return cand[:18] if cand else ["（候補を生成できません）"]
+    return rule_based_chord_suggestions(
+        key,
+        target,
+        next_chord=next_chord,
+        melody_midi=melody_midi,
+        current_figure=figure,
+    )
 
 
 def _scale_pitch_classes(ky: m21_key.Key) -> set[int]:
