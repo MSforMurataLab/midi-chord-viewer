@@ -1,18 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec: dist/MIDIChordViewer/MIDIChordViewer.exe"""
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 
 block_cipher = None
 
 datas_m21, binaries_m21, hidden_m21 = collect_all("music21")
 datas_mpl, binaries_mpl, hidden_mpl = collect_all("matplotlib")
+binaries_sd = collect_dynamic_libs("sounddevice")
+_app_assets = [("image.png", ".")]
 
 a = Analysis(
     ["app.py"],
     pathex=[],
-    binaries=binaries_m21 + binaries_mpl,
-    datas=datas_m21 + datas_mpl,
+    binaries=binaries_m21 + binaries_mpl + binaries_sd,
+    datas=datas_m21 + datas_mpl + _app_assets,
     hiddenimports=hidden_m21
     + hidden_mpl
     + [
@@ -28,7 +30,32 @@ a = Analysis(
         "music21.roman",
         "mido",
         "mido.backends.rtmidi",
-        "piano_keyboard",
+        "midi_lab",
+        "midi_lab.bootstrap",
+        "midi_lab.resources",
+        "midi_lab.core",
+        "midi_lab.core.harmony",
+        "midi_lab.core.score",
+        "midi_lab.core.playback",
+        "midi_lab.core.plotting",
+        "midi_lab.ui",
+        "midi_lab.ui.theme",
+        "midi_lab.ui.main_window",
+        "midi_lab.ui.widgets",
+        "midi_lab.ui.widgets.piano_keyboard",
+        "midi_lab.ui.widgets.timeline_panel",
+        "midi_lab.ui.widgets.timeline_delegate",
+        "midi_lab.ui.widgets.welcome_page",
+        "midi_lab.ui.widgets.sidebar",
+        "midi_lab.ui.widgets.loading_overlay",
+        "midi_lab.ui.splash",
+        "midi_lab.ui.startup",
+        "midi_lab.core.settings",
+        "midi_lab.core.load_worker",
+        "sounddevice",
+        "numpy",
+        "midi_lab.diagnostics",
+        "midi_lab.ui.design_tokens",
     ],
     hookspath=[],
     hooksconfig={},
@@ -58,6 +85,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="app.ico",
 )
 
 coll = COLLECT(

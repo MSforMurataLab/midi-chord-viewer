@@ -8,6 +8,12 @@ if not exist ".venv\Scripts\python.exe" (
 )
 call .venv\Scripts\activate.bat
 python -m pip install -q pyinstaller
+python -c "from PIL import Image; im=Image.open('image.png').convert('RGBA'); icons=[im.resize(s, Image.Resampling.LANCZOS) for s in ((256,256),(128,128),(64,64),(48,48),(32,32),(16,16))]; icons[0].save('app.ico', format='ICO', sizes=[(x.width,x.height) for x in icons], append_images=icons[1:])"
+if errorlevel 1 (
+  echo image.png から app.ico を作成できませんでした。
+  pause
+  exit /b 1
+)
 pyinstaller --noconfirm midi_chord_viewer.spec
 if errorlevel 1 (
   echo ビルドに失敗しました。

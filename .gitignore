@@ -5,6 +5,7 @@ build/
 __pycache__/
 *.py[cod]
 *.spec.bak
+app.ico
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
@@ -12,3 +13,5 @@ __pycache__/
 *.midi
 .DS_Store
 Thumbs.db
+*.log
+.cursor/
