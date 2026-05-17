@@ -53,6 +53,8 @@ a = Analysis(
         "midi_lab.ui.startup",
         "midi_lab.core.settings",
         "midi_lab.core.load_worker",
+        "midi_lab.core.launch_args",
+        "midi_lab.core.file_association",
         "sounddevice",
         "numpy",
         "midi_lab.diagnostics",

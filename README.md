@@ -2,7 +2,7 @@
 
 MIDI の和声（コード）を解析・編集する Windows 向けデスクトップアプリです。PyQt6 と music21 をベースに、**和声タイムライン**・**ルールベース理論アシスト**・**仮想鍵盤**・**再生**を一体化しています。
 
-**現在のバージョン:** 2.4.5
+**現在のバージョン:** 2.5.0
 
 ## 主な機能
 
@@ -50,9 +50,28 @@ pyinstaller midi_chord_viewer.spec --noconfirm
 
 `build.bat` は `image.png` から `app.ico` を生成してから PyInstaller を実行します（`app.ico` は `.gitignore` 対象）。
 
+## MIDI ファイルをダブルクリック／「プログラムから開く」で起動
+
+### 初回のみ: 関連付けの登録（Windows）
+
+1. `build.bat` で exe をビルドする。
+2. 次のいずれかで登録する。
+   - **アプリ内:** `dist\MIDIChordViewer\MIDIChordViewer.exe` を起動 → **ファイル** → **MIDI ファイルの関連付けを登録…**
+   - **コマンド:** `MIDIChordViewer.exe --register-midi-association`
+   - **スクリプト:** `scripts\register_midi_association.bat`
+3. エクスプローラーで `.mid` を右クリック → **プログラムから開く** → **MIDI Chord Lab**（または `MIDIChordViewer.exe`）を選択。常にこのアプリで開く場合は **常に** を選ぶ。
+
+登録後は、関連付けされた MIDI を開くと **インポート済みの状態**（タイムライン表示・編集・再生可能）で起動します。
+
+### 開発時にパス指定で開く
+
+```bash
+python app.py "C:\path\to\song.mid"
+```
+
 ## 使い方（概要）
 
-1. MIDI（`.mid` / `.midi`）を開くかドロップする。
+1. MIDI（`.mid` / `.midi`）を開くかドロップする（または上記の関連付けで起動）。
 2. 左サイドバーで **キー**・**BPM** を確認し、中央の **和声タイムライン** でコードを確認・ダブルクリック編集する。
 3. **再生** / **停止** で聴きながら、行がハイライトされる。
 4. 右 **理論アシスト** で候補をダブルクリックすると、コード列に反映される。
@@ -102,9 +121,11 @@ midi_lab/
     chord_rules.py          # ルールベース理論アシスト
     playback.py             # 再生スレッド
     load_worker.py          # 非同期読み込み
+    launch_args.py          # 起動時の MIDI パス引数
+    file_association.py     # Windows ファイル関連付け
   ui/
     main_window.py          # メイン UI
-    theme.py                # Midnight Studio テーマ
+    theme.py                # Studio Graphite テーマ
     widgets/                # タイムライン・サイドバー・鍵盤など
 midi_chord_viewer.spec      # PyInstaller
 requirements.txt

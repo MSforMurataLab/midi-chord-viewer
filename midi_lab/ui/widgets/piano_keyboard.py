@@ -45,7 +45,7 @@ class PianoKeyboard(QWidget):
         margin = 10.0
         inner = QRectF(margin, margin, w - 2 * margin, h - 2 * margin - 4)
         painter.setPen(QPen(QColor(dt.BORDER_SUBTLE), 1.0))
-        painter.setBrush(QColor("#0e0e14"))
+        painter.setBrush(QColor(dt.PIANO_WELL))
         painter.drawRoundedRect(inner, 8, 8)
 
         white_keys = [m for m in range(self.MIDI_LOW, self.MIDI_HIGH + 1) if not _is_black_key(m)]
@@ -65,10 +65,10 @@ class PianoKeyboard(QWidget):
             active = midi in self._active
             g = QLinearGradient(QPointF(x, top_y), QPointF(x, area.bottom()))
             if active:
-                g.setColorAt(0, QColor("#fde68a"))
+                g.setColorAt(0, QColor(dt.ACTIVE_KEY_LIGHT))
                 g.setColorAt(0.45, QColor(dt.ACTIVE_KEY))
                 g.setColorAt(1, QColor(dt.ACTIVE_KEY_DEEP))
-                painter.setPen(QPen(QColor("#fbbf24"), 1.5))
+                painter.setPen(QPen(QColor(dt.ACCENT), 1.5))
             else:
                 g.setColorAt(0, QColor(dt.PIANO_WHITE_TOP))
                 g.setColorAt(1, QColor(dt.PIANO_WHITE_BOT))
@@ -93,9 +93,9 @@ class PianoKeyboard(QWidget):
             active = gap_midi in self._active
             g = QLinearGradient(QPointF(bx, top_y), QPointF(bx, top_y + black_h))
             if active:
-                g.setColorAt(0, QColor("#fdba74"))
-                g.setColorAt(1, QColor("#9a3412"))
-                painter.setPen(QPen(QColor("#fb923c"), 1.2))
+                g.setColorAt(0, QColor(dt.ACTIVE_KEY_LIGHT))
+                g.setColorAt(1, QColor(dt.ACTIVE_KEY_DEEP))
+                painter.setPen(QPen(QColor(dt.ACCENT), 1.2))
             else:
                 g.setColorAt(0, QColor(dt.PIANO_BLACK_TOP))
                 g.setColorAt(1, QColor(dt.PIANO_BLACK_BOT))

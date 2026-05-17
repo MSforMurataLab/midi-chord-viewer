@@ -120,6 +120,10 @@ class MainWindow(QMainWindow):
         self._assist_act.setChecked(True)
         self._assist_act.triggered.connect(self._toggle_assist_panel)
 
+        self._register_assoc_act = QAction("MIDI ファイルの関連付けを登録…", self)
+        self._register_assoc_act.triggered.connect(self._register_midi_association)
+        self._unregister_assoc_act = QAction("MIDI ファイルの関連付けを解除…", self)
+        self._unregister_assoc_act.triggered.connect(self._unregister_midi_association)
         about_act = QAction("MIDI Chord Lab について", self)
         about_act.triggered.connect(self._show_about)
         quit_act = QAction("終了", self)
@@ -133,6 +137,9 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self._export_xml_act)
         file_menu.addAction(self._export_midi_act)
+        file_menu.addSeparator()
+        file_menu.addAction(self._register_assoc_act)
+        file_menu.addAction(self._unregister_assoc_act)
         file_menu.addSeparator()
         file_menu.addAction(quit_act)
 
@@ -178,7 +185,7 @@ class MainWindow(QMainWindow):
         brand.setSpacing(3)
         t = QLabel("MIDI Chord Lab")
         t.setObjectName("HeaderTitle")
-        sub = QLabel(f"Midnight Studio  ·  v{__version__}")
+        sub = QLabel(f"Studio Graphite  ·  v{__version__}")
         sub.setObjectName("HeaderSubtitle")
         sub.setWordWrap(True)
         brand.addWidget(t)
@@ -474,6 +481,38 @@ class MainWindow(QMainWindow):
             self._load_worker.requestInterruption()
             self._load_worker.wait(3000)
         super().closeEvent(event)
+
+    def _register_midi_association(self) -> None:
+        import sys
+
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "関連付け",
+                "ファイル関連付けは配布版の MIDIChordViewer.exe から登録してください。\n\n"
+                "開発時は次のように MIDI を直接開けます:\n"
+                "  python app.py 曲.mid\n\n"
+                "ビルド後: dist\\MIDIChordViewer\\MIDIChordViewer.exe を実行し、\n"
+                "ファイル →「MIDI ファイルの関連付けを登録」",
+            )
+            return
+
+        from midi_lab.core.file_association import register_midi_associations
+
+        ok, msg = register_midi_associations()
+        if ok:
+            QMessageBox.information(self, "関連付け", msg)
+        else:
+            QMessageBox.warning(self, "関連付け", msg)
+
+    def _unregister_midi_association(self) -> None:
+        from midi_lab.core.file_association import unregister_midi_associations
+
+        ok, msg = unregister_midi_associations()
+        if ok:
+            QMessageBox.information(self, "関連付け", msg)
+        else:
+            QMessageBox.warning(self, "関連付け", msg)
 
     def _show_about(self) -> None:
         QMessageBox.about(

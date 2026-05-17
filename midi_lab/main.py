@@ -35,14 +35,49 @@ def _install_excepthook() -> None:
     sys.excepthook = _hook
 
 
+def _cli_message(title: str, message: str, success: bool) -> None:
+    """windowed exe でも結果を表示（コンソールなしビルド向け）。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            icon = 0x40 if success else 0x10
+            ctypes.windll.user32.MessageBoxW(0, message, title, icon)
+            return
+        except Exception:
+            pass
+    print(message)
+
+
 def _show_startup_error(message: str) -> None:
     log(f"STARTUP ERROR:\n{message}")
     QMessageBox.critical(None, "起動エラー", f"アプリケーションの初期化に失敗しました。\n\n{message[:4000]}")
 
 
 def run() -> int:
+    from midi_lab.core.launch_args import (
+        initial_midi_path,
+        is_register_association_request,
+        is_unregister_association_request,
+    )
+
+    if is_register_association_request():
+        from midi_lab.core.file_association import register_midi_associations
+
+        ok, msg = register_midi_associations()
+        _cli_message("MIDI Chord Lab — 関連付け", msg, ok)
+        return 0 if ok else 1
+
+    if is_unregister_association_request():
+        from midi_lab.core.file_association import unregister_midi_associations
+
+        ok, msg = unregister_midi_associations()
+        _cli_message("MIDI Chord Lab — 関連付け解除", msg, ok)
+        return 0 if ok else 1
+
+    pending_midi = initial_midi_path()
     _install_excepthook()
-    log("--- run start ---")
+    log(f"--- run start pending_midi={pending_midi!r} ---")
 
     app = QApplication(sys.argv)
     apply_app_font(app)
@@ -123,6 +158,9 @@ def run() -> int:
             def _done():
                 _finalize_startup(win)
                 win._refresh_layout()
+                if pending_midi:
+                    log(f"opening file from argv: {pending_midi}")
+                    win.load_file(pending_midi)
 
             QTimer.singleShot(400, _done)
         except Exception:

@@ -14,70 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from midi_lab import __version__
-
-SPLASH_STYLESHEET = """
-QWidget#SplashRoot {
-    background-color: #050508;
-}
-QFrame#SplashCard {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #18181f, stop:1 #0a0a10);
-    border: 1px solid #f59e0b;
-    border-radius: 22px;
-}
-QFrame#SplashLogo {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #fbbf24, stop:1 #d97706);
-    border-radius: 16px;
-    min-width: 56px;
-    max-width: 56px;
-    min-height: 56px;
-    max-height: 56px;
-}
-QLabel#SplashLogoText {
-    color: #1c1917;
-    font-size: 20px;
-    font-weight: 800;
-    background: transparent;
-}
-QLabel#SplashTitle {
-    color: #fafafa;
-    font-size: 26px;
-    font-weight: 800;
-    letter-spacing: -0.3px;
-    background: transparent;
-}
-QLabel#SplashSubtitle {
-    color: #a78bfa;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 1px;
-    background: transparent;
-}
-QLabel#SplashStatus {
-    color: #71717a;
-    font-size: 12px;
-    background: transparent;
-}
-QLabel#SplashVersion {
-    color: #52525b;
-    font-size: 10px;
-    font-weight: 600;
-    background: transparent;
-}
-QProgressBar {
-    background-color: #0c0c12;
-    border: 1px solid #32324a;
-    border-radius: 5px;
-    min-height: 6px;
-    max-height: 6px;
-}
-QProgressBar::chunk {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #d97706, stop:1 #fbbf24);
-    border-radius: 4px;
-}
-"""
+from midi_lab.ui.theme import SPLASH_STYLESHEET
 
 
 class SplashWindow(QWidget):
@@ -119,7 +56,7 @@ class SplashWindow(QWidget):
         title = QLabel("MIDI Chord Lab")
         title.setObjectName("SplashTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub = QLabel("MIDNIGHT STUDIO")
+        sub = QLabel("STUDIO GRAPHITE")
         sub.setObjectName("SplashSubtitle")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
