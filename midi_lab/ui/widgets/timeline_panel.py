@@ -22,9 +22,10 @@ COL_BEAT = 0
 COL_OFFSET = 1
 COL_DURATION = 2
 COL_LABEL = 3
-COL_PITCHES = 4
+COL_ROMAN = 4
+COL_PITCHES = 5
 
-HEADERS = ["拍", "開始（拍）", "長さ", "コード／音名", "構成音"]
+HEADERS = ["拍", "開始（拍）", "長さ", "コード／音名", "機能", "構成音"]
 
 
 class TimelinePanel(QFrame):
@@ -64,6 +65,7 @@ class TimelinePanel(QFrame):
         hdr.setSectionResizeMode(COL_OFFSET, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_DURATION, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_LABEL, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(COL_ROMAN, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_PITCHES, QHeaderView.ResizeMode.Stretch)
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 

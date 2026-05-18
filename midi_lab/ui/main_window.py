@@ -36,8 +36,18 @@ from music21 import note as m21_note
 from music21 import pitch as m21_pitch
 from music21 import stream as m21_stream
 
+from midi_lab.core.analysis_report import build_analysis_html
+from midi_lab.core.functional_harmony import functional_label
 from midi_lab.core.load_worker import LoadedScore, MidiLoadWorker
+from midi_lab.core.note_events import NoteEvent
+from midi_lab.core.performance_analytics import (
+    analyze_performance,
+    build_performance_dashboard_figure,
+    report_summary_text,
+)
+from midi_lab.core.pianoroll_plot import build_pianoroll_figure_from_notes
 from midi_lab.core.settings import add_recent_file, recent_files, set_fullscreen_default
+from midi_lab.core.voice_leading import analyze_voice_leading, format_motions
 from midi_lab.core.harmony import (
     detect_key_for_score,
     event_display_label,
@@ -50,13 +60,22 @@ from midi_lab.core.harmony import (
 from midi_lab.core.playback import PlaybackThread, stop_audio_output
 from midi_lab.core.score import build_playback_timeline, collect_harmony_events, rebuild_stream_from_table
 from midi_lab import __version__
-from midi_lab.ui.widgets import LoadingOverlay, PianoKeyboard, SidebarPanel, TimelinePanel, WelcomePage
+from midi_lab.ui.widgets import (
+    LoadingOverlay,
+    PianoKeyboard,
+    ScoreCanvas,
+    SidebarPanel,
+    TimelinePanel,
+    VoiceLeadingPanel,
+    WelcomePage,
+)
 from midi_lab.ui.widgets.timeline_panel import (
     COL_BEAT,
     COL_DURATION,
     COL_LABEL,
     COL_OFFSET,
     COL_PITCHES,
+    COL_ROMAN,
 )
 
 
@@ -81,6 +100,8 @@ class MainWindow(QMainWindow):
         self._assist_width = 300
         self._body_split: QSplitter | None = None
         self._sidebar_min_width = SidebarPanel.WIDTH
+        self._note_events: list[NoteEvent] = []
+        self._voice_steps = []
 
         self._build_menus()
         self._build_ui()
@@ -99,6 +120,10 @@ class MainWindow(QMainWindow):
         self._export_midi_act.setShortcut("Ctrl+Shift+M")
         self._export_midi_act.setEnabled(False)
         self._export_midi_act.triggered.connect(self.export_midi_file)
+        self._export_report_act = QAction("分析レポート (HTML)…", self)
+        self._export_report_act.setShortcut("Ctrl+Shift+R")
+        self._export_report_act.setEnabled(False)
+        self._export_report_act.triggered.connect(self.export_analysis_report)
         play_act = QAction("再生", self)
         play_act.setShortcut("Ctrl+Return")
         play_act.triggered.connect(self.play_transport)
@@ -137,6 +162,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self._export_xml_act)
         file_menu.addAction(self._export_midi_act)
+        file_menu.addAction(self._export_report_act)
         file_menu.addSeparator()
         file_menu.addAction(self._register_assoc_act)
         file_menu.addAction(self._unregister_assoc_act)
@@ -296,6 +322,7 @@ class MainWindow(QMainWindow):
         self._btn_open = panel.btn_open
         self._btn_export_xml = panel.btn_export_xml
         self._btn_export_midi = panel.btn_export_midi
+        self._btn_export_report = panel.btn_export_report
         self._btn_play = panel.btn_play
         self._btn_stop = panel.btn_stop
         self._tempo = panel.tempo
@@ -303,12 +330,25 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_workspace(self) -> QWidget:
-        panel = TimelinePanel()
-        self._timeline_panel = panel
-        self.table = panel.table
-        self._table_font = panel._font
-        self._table_font_mono = panel._font_mono
-        return panel
+        wrap = QWidget()
+        lay = QVBoxLayout(wrap)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._workspace_tabs = QTabWidget()
+        self._workspace_tabs.setDocumentMode(True)
+        self._timeline_panel = TimelinePanel()
+        self.table = self._timeline_panel.table
+        self._table_font = self._timeline_panel._font
+        self._table_font_mono = self._timeline_panel._font_mono
+        self._workspace_tabs.addTab(self._timeline_panel, "和声タイムライン")
+        self._pianoroll_canvas = ScoreCanvas()
+        self._perf_canvas = ScoreCanvas()
+        self._voice_panel = VoiceLeadingPanel()
+        self._workspace_tabs.addTab(self._pianoroll_canvas, "ピアノロール")
+        self._workspace_tabs.addTab(self._perf_canvas, "パフォーマンス")
+        self._workspace_tabs.addTab(self._voice_panel, "声部進行")
+        lay.addWidget(self._workspace_tabs)
+        return wrap
 
     def _build_assist_panel(self) -> QFrame:
         panel = QFrame()
@@ -367,6 +407,7 @@ class MainWindow(QMainWindow):
         self._btn_open.clicked.connect(self.open_midi)
         self._btn_export_xml.clicked.connect(self.export_musicxml)
         self._btn_export_midi.clicked.connect(self.export_midi_file)
+        self._btn_export_report.clicked.connect(self.export_analysis_report)
         self._btn_play.clicked.connect(self.play_transport)
         self._btn_stop.clicked.connect(self.stop_transport)
         self.table.cellChanged.connect(self._on_table_cell_changed)
@@ -575,11 +616,94 @@ class MainWindow(QMainWindow):
     def _enable_score_controls(self, on: bool) -> None:
         self._export_xml_act.setEnabled(on)
         self._export_midi_act.setEnabled(on)
+        self._export_report_act.setEnabled(on)
         self._btn_export_xml.setEnabled(on)
         self._btn_export_midi.setEnabled(on)
+        self._btn_export_report.setEnabled(on)
         self._btn_play.setEnabled(on)
         self._btn_stop.setEnabled(on)
         self._tempo.setEnabled(on)
+
+    def _roman_for_row_element(self, el) -> str:
+        return functional_label(el, self._detected_key)
+
+    def _refresh_analysis_views(self) -> None:
+        if self._work_flat is None:
+            self._clear_analysis_views()
+            return
+        events = self._note_events
+        report = analyze_performance(events)
+        if events:
+            self._pianoroll_canvas.set_figure(build_pianoroll_figure_from_notes(events))
+            self._perf_canvas.set_figure(build_performance_dashboard_figure(events, report))
+        else:
+            self._pianoroll_canvas.show_placeholder()
+            self._perf_canvas.show_placeholder()
+
+        harmony = collect_harmony_events(self._work_flat)
+        self._voice_steps = analyze_voice_leading(
+            harmony,
+            lambda el: event_display_label(el, self._detected_key),
+        )
+        vl_rows = [
+            (
+                s.index,
+                s.from_label,
+                s.to_label,
+                format_motions(s.motions),
+                s.motion_kind,
+                s.total_motion,
+            )
+            for s in self._voice_steps
+        ]
+        self._voice_panel.populate(vl_rows)
+        parallel = sum(1 for s in self._voice_steps if s.motion_kind == "順行")
+        contrary = sum(1 for s in self._voice_steps if s.motion_kind == "逆行")
+        self._voice_panel.set_summary(
+            f"和音遷移 {len(self._voice_steps)} 件 · 順行 {parallel} · 逆行 {contrary} · "
+            f"{report_summary_text(report)}"
+        )
+
+    def _clear_analysis_views(self) -> None:
+        self._voice_steps = []
+        if hasattr(self, "_pianoroll_canvas"):
+            self._pianoroll_canvas.show_placeholder()
+        if hasattr(self, "_perf_canvas"):
+            self._perf_canvas.show_placeholder()
+        if hasattr(self, "_voice_panel"):
+            self._voice_panel.clear_data()
+
+    def export_analysis_report(self) -> None:
+        if self._work_flat is None or self._current_path is None:
+            return
+        default = self._current_path.stem + "_analysis.html"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "分析レポートを保存",
+            default,
+            "HTML (*.html);;すべて (*.*)",
+        )
+        if not path:
+            return
+        try:
+            labels = self._labels()
+            romans = []
+            for r in range(self.table.rowCount()):
+                it = self.table.item(r, COL_ROMAN)
+                romans.append(it.text() if it else "—")
+            report = analyze_performance(self._note_events)
+            html = build_analysis_html(
+                self._current_path.name,
+                self._key_display.text(),
+                report,
+                self._voice_steps,
+                labels,
+                romans,
+            )
+            Path(path).write_text(html, encoding="utf-8")
+            self.statusBar().showMessage(f"分析レポート: {path}", 10000)
+        except Exception:
+            QMessageBox.critical(self, "エラー", traceback.format_exc())
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if not event.mimeData().hasUrls():
@@ -646,11 +770,13 @@ class MainWindow(QMainWindow):
             pitches = self._elem_pitches(el)
             r = self.table.rowCount()
             self.table.insertRow(r)
+            roman = self._roman_for_row_element(el)
             cells = (
                 (COL_BEAT, self._elem_beat(el), read_only, self._table_font_mono),
                 (COL_OFFSET, f"{off:.2f}", read_only, self._table_font_mono),
                 (COL_DURATION, f"{ql:.2f}", read_only, self._table_font_mono),
                 (COL_LABEL, label, editable, self._table_font),
+                (COL_ROMAN, roman, read_only, self._table_font_mono),
                 (COL_PITCHES, pitches, read_only, self._table_font_mono),
             )
             for col, val, flags, font in cells:
@@ -716,9 +842,14 @@ class MainWindow(QMainWindow):
             pit = self.table.item(row, COL_PITCHES)
             if pit is not None:
                 pit.setText(" ".join(m21_pitch.Pitch(m).nameWithOctave for m in mids))
+            el_new, _ = parse_chord_cell(item.text(), self._row_ql[row])
+            rom = self.table.item(row, COL_ROMAN)
+            if rom is not None:
+                rom.setText(self._roman_for_row_element(el_new))
             self.piano.set_active_pitches(set(mids))
             self._refresh_suggestions(row)
             self._update_timeline_stats()
+            self._refresh_analysis_views()
         except Exception:
             QMessageBox.critical(self, "エラー", traceback.format_exc())
 
@@ -786,11 +917,16 @@ class MainWindow(QMainWindow):
             pit = self.table.item(row, COL_PITCHES)
             if pit is not None:
                 pit.setText(" ".join(m21_pitch.Pitch(m).nameWithOctave for m in mids))
+            el_new, _ = parse_chord_cell(txt, self._row_ql[row])
+            rom = self.table.item(row, COL_ROMAN)
+            if rom is not None:
+                rom.setText(self._roman_for_row_element(el_new))
             self.piano.set_active_pitches(set(mids))
         except Exception:
             pass
         self._refresh_suggestions(row)
         self._update_timeline_stats()
+        self._refresh_analysis_views()
 
     def play_transport(self) -> None:
         if self._work_flat is None:
@@ -891,8 +1027,10 @@ class MainWindow(QMainWindow):
             self._current_path = Path(payload.path)
             self._detected_key = payload.key_obj
             self._key_display.setText(payload.key_text)
+            self._note_events = list(payload.note_events)
             add_recent_file(payload.path)
             self._fill_table_from_work()
+            self._refresh_analysis_views()
             self._chord_list.clear()
             self._melody_list.clear()
             self.piano.clear_active()
@@ -916,8 +1054,10 @@ class MainWindow(QMainWindow):
         self._work_flat = None
         self._current_path = None
         self._detected_key = None
+        self._note_events = []
         self._key_display.setText("—")
         self._enable_score_controls(False)
+        self._clear_analysis_views()
         self._header_badge.setText("STANDBY")
         self._header_badge.setObjectName("HeaderBadge")
         self._header_badge.style().unpolish(self._header_badge)

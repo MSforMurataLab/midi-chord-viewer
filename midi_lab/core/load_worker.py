@@ -9,6 +9,7 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from midi_lab.core.harmony import detect_key_for_score
+from midi_lab.core.note_events import NoteEvent, collect_note_events
 from midi_lab.core.score import build_flat_work_stream, load_score
 
 
@@ -19,6 +20,7 @@ class LoadedScore:
     work_flat: object
     key_text: str
     key_obj: object | None
+    note_events: tuple[NoteEvent, ...]
 
 
 class MidiLoadWorker(QThread):
@@ -40,13 +42,15 @@ class MidiLoadWorker(QThread):
             ktxt, kobj = detect_key_for_score(score)
             if kobj is None:
                 ktxt, kobj = detect_key_for_score(work)
-            self.progress.emit("ピアノロールを準備しています…")
+            self.progress.emit("パフォーマンスデータを抽出しています…")
+            notes = tuple(collect_note_events(score))
             payload = LoadedScore(
                 path=self._path,
                 score=score,
                 work_flat=work,
                 key_text=ktxt,
                 key_obj=kobj,
+                note_events=notes,
             )
             self.completed.emit(payload)
         except Exception:

@@ -122,9 +122,9 @@ class WelcomePage(QWidget):
         chips.setContentsMargins(0, 0, 0, 0)
         chips.setSpacing(10)
         chips.addWidget(_feature_chip("和声解析", "コード名を自動抽出"), 0, 0)
-        chips.addWidget(_feature_chip("タイムライン", "和声イベントを一覧表示"), 0, 1)
+        chips.addWidget(_feature_chip("分析スタジオ", "ピアノロール・パフォーマンス・声部進行"), 0, 1)
         chips.addWidget(_feature_chip("理論アシスト", "コード・メロディ候補"), 1, 0)
-        chips.addWidget(_feature_chip("書き出し", "MusicXML / MIDI"), 1, 1)
+        chips.addWidget(_feature_chip("書き出し", "MusicXML / MIDI / HTML レポート"), 1, 1)
         for c in range(2):
             chips.setColumnStretch(c, 1)
 
