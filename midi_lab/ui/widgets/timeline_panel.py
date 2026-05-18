@@ -2,14 +2,15 @@
 """タイムライン専用パネル — 和声イベントを表形式で大きく表示。"""
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QSizePolicy,
     QTableWidget,
     QVBoxLayout,
@@ -32,6 +33,9 @@ class TimelinePanel(QFrame):
     """編集可能な和声タイムライン表。"""
 
     LABEL_COL = COL_LABEL
+    insert_row_requested = pyqtSignal(int)
+    delete_row_requested = pyqtSignal(int)
+    duplicate_row_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -87,8 +91,12 @@ class TimelinePanel(QFrame):
         self.table.setShowGrid(True)
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_row_menu)
 
-        hint = QLabel("コード／音名列をダブルクリックで編集 · 行を選ぶと理論候補と鍵盤が連動")
+        hint = QLabel(
+            "コード／音名・長さをダブルクリックで編集 · 右クリックで行の追加／削除 · 理論候補と鍵盤が連動"
+        )
         hint.setObjectName("PanelHint")
         hint.setWordWrap(True)
         hint_wrap = QFrame()
@@ -128,3 +136,21 @@ class TimelinePanel(QFrame):
 
     def set_stats(self, text: str) -> None:
         self._stats.setText(text)
+
+    def _show_row_menu(self, pos) -> None:
+        index = self.table.indexAt(pos)
+        row = index.row() if index.isValid() else self.table.currentRow()
+        menu = QMenu(self)
+        insert_act = QAction("この下に行を追加", self)
+        dup_act = QAction("行を複製", self)
+        del_act = QAction("行を削除", self)
+        insert_act.triggered.connect(lambda: self.insert_row_requested.emit(max(row, 0)))
+        dup_act.triggered.connect(
+            lambda: self.duplicate_row_requested.emit(max(row, 0))
+        )
+        del_act.triggered.connect(lambda: self.delete_row_requested.emit(max(row, 0)))
+        menu.addAction(insert_act)
+        if row >= 0:
+            menu.addAction(dup_act)
+            menu.addAction(del_act)
+        menu.exec(self.table.viewport().mapToGlobal(pos))

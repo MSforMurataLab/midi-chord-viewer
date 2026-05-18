@@ -12,8 +12,10 @@ from PyQt6.QtCore import QThread, pyqtSignal
 _PROGRESS_YIELD_MS = 15
 
 from midi_lab.core.harmony import detect_key_for_score
+from midi_lab.core.midi_tempo import detect_score_bpm
 from midi_lab.core.note_events import NoteEvent, collect_note_events
 from midi_lab.core.score import build_flat_work_stream, load_score
+from midi_lab.core.settings import default_tempo
 
 
 @dataclass
@@ -24,6 +26,7 @@ class LoadedScore:
     key_text: str
     key_obj: object | None
     note_events: tuple[NoteEvent, ...]
+    bpm: int
 
 
 class MidiLoadWorker(QThread):
@@ -52,6 +55,7 @@ class MidiLoadWorker(QThread):
             notes = tuple(collect_note_events(score))
             if self.isInterruptionRequested():
                 return
+            bpm = detect_score_bpm(score, default_tempo())
             payload = LoadedScore(
                 path=self._path,
                 score=score,
@@ -59,6 +63,7 @@ class MidiLoadWorker(QThread):
                 key_text=ktxt,
                 key_obj=kobj,
                 note_events=notes,
+                bpm=bpm,
             )
             self.completed.emit(payload)
         except Exception:

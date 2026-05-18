@@ -37,6 +37,7 @@ from music21 import pitch as m21_pitch
 from music21 import stream as m21_stream
 
 from midi_lab.core.analysis_build_worker import AnalysisBuildWorker, AnalysisResult
+from midi_lab.core.edit_history import EditHistory, TimelineSnapshot
 from midi_lab.core.analysis_report import build_analysis_html
 from midi_lab.core.functional_harmony import functional_label
 from midi_lab.core.load_worker import LoadedScore, MidiLoadWorker
@@ -47,7 +48,14 @@ from midi_lab.core.performance_analytics import (
     report_summary_text,
 )
 from midi_lab.core.pianoroll_plot import build_pianoroll_figure_from_notes
-from midi_lab.core.settings import add_recent_file, recent_files, set_fullscreen_default
+from midi_lab.core.settings import (
+    add_recent_file,
+    assist_panel_visible_default,
+    default_tempo,
+    recent_files,
+    set_fullscreen_default,
+)
+from midi_lab.ui.preferences_dialog import PreferencesDialog
 from midi_lab.core.voice_leading import analyze_voice_leading, format_motions
 from midi_lab.core.harmony import (
     clear_chord_figure_cache,
@@ -106,6 +114,13 @@ class MainWindow(QMainWindow):
         self._sidebar_min_width = SidebarPanel.WIDTH
         self._note_events: list[NoteEvent] = []
         self._voice_steps = []
+        self._dirty = False
+        self._edit_history = EditHistory()
+        self._analysis_debounce = QTimer(self)
+        self._analysis_debounce.setSingleShot(True)
+        self._analysis_debounce.setInterval(400)
+        self._analysis_debounce.timeout.connect(self._start_analysis_build)
+        self._hist_cell_pushed = False
 
         self._build_menus()
         self._build_ui()
@@ -128,6 +143,18 @@ class MainWindow(QMainWindow):
         self._export_report_act.setShortcut("Ctrl+Shift+R")
         self._export_report_act.setEnabled(False)
         self._export_report_act.triggered.connect(self.export_analysis_report)
+        self._save_act = QAction("MIDI を保存", self)
+        self._save_act.setShortcut(QKeySequence.StandardKey.Save)
+        self._save_act.setEnabled(False)
+        self._save_act.triggered.connect(self.save_current_midi)
+        self._undo_act = QAction("元に戻す", self)
+        self._undo_act.setShortcut(QKeySequence.StandardKey.Undo)
+        self._undo_act.setEnabled(False)
+        self._undo_act.triggered.connect(self.undo_edit)
+        self._redo_act = QAction("やり直し", self)
+        self._redo_act.setShortcut(QKeySequence.StandardKey.Redo)
+        self._redo_act.setEnabled(False)
+        self._redo_act.triggered.connect(self.redo_edit)
         play_act = QAction("再生", self)
         play_act.setShortcut("Ctrl+Return")
         play_act.triggered.connect(self.play_transport)
@@ -153,6 +180,8 @@ class MainWindow(QMainWindow):
         self._register_assoc_act.triggered.connect(self._register_midi_association)
         self._unregister_assoc_act = QAction("MIDI ファイルの関連付けを解除…", self)
         self._unregister_assoc_act.triggered.connect(self._unregister_midi_association)
+        prefs_act = QAction("設定…", self)
+        prefs_act.triggered.connect(self._show_preferences)
         about_act = QAction("MIDI Chord Lab について", self)
         about_act.triggered.connect(self._show_about)
         quit_act = QAction("終了", self)
@@ -167,6 +196,13 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._export_xml_act)
         file_menu.addAction(self._export_midi_act)
         file_menu.addAction(self._export_report_act)
+        file_menu.addAction(self._save_act)
+        file_menu.addSeparator()
+
+        edit_menu = self.menuBar().addMenu("編集(&E)")
+        edit_menu.addAction(self._undo_act)
+        edit_menu.addAction(self._redo_act)
+
         file_menu.addSeparator()
         file_menu.addAction(self._register_assoc_act)
         file_menu.addAction(self._unregister_assoc_act)
@@ -184,6 +220,7 @@ class MainWindow(QMainWindow):
         transport_menu.addAction(stop_act)
 
         help_menu = self.menuBar().addMenu("ヘルプ(&H)")
+        help_menu.addAction(prefs_act)
         help_menu.addAction(about_act)
 
     def _build_ui(self) -> None:
@@ -378,7 +415,7 @@ class MainWindow(QMainWindow):
         row.addWidget(accent)
         row.addLayout(col)
         row.addStretch(1)
-        badge = QLabel("AI HINT")
+        badge = QLabel("理論ヒント")
         badge.setObjectName("AssistBadge")
         row.addWidget(badge, alignment=Qt.AlignmentFlag.AlignVCenter)
         v.addWidget(bar)
@@ -408,6 +445,10 @@ class MainWindow(QMainWindow):
 
     def _wire_signals(self) -> None:
         self._welcome.open_requested.connect(self.open_midi)
+        self._welcome.file_dropped.connect(self.load_file)
+        self._timeline_panel.insert_row_requested.connect(self._insert_row_after)
+        self._timeline_panel.duplicate_row_requested.connect(self._duplicate_row)
+        self._timeline_panel.delete_row_requested.connect(self._delete_row)
         self._btn_open.clicked.connect(self.open_midi)
         self._btn_export_xml.clicked.connect(self.export_musicxml)
         self._btn_export_midi.clicked.connect(self.export_midi_file)
@@ -505,6 +546,8 @@ class MainWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(50, self._refresh_layout)
+        if not assist_panel_visible_default():
+            QTimer.singleShot(80, lambda: self._toggle_assist_panel(False))
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_F11:
@@ -515,12 +558,39 @@ class MainWindow(QMainWindow):
             self._exit_fullscreen()
             event.accept()
             return
+        if event.key() == Qt.Key.Key_Space and self._work_flat is not None:
+            if self.table.state() == QAbstractItemView.State.EditingState:
+                super().keyPressEvent(event)
+                return
+            if self._playback is not None and self._playback.isRunning():
+                self.stop_transport()
+            else:
+                self.play_transport()
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
         from midi_lab.diagnostics import log_stack
 
         log_stack("MainWindow.closeEvent")
+        if self._dirty and self._work_flat is not None:
+            ans = QMessageBox.question(
+                self,
+                "終了の確認",
+                "保存していない変更があります。終了しますか？",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if ans == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if ans == QMessageBox.StandardButton.Save:
+                if not self.save_current_midi(silent=True):
+                    event.ignore()
+                    return
         self.stop_transport()
         self._stop_analysis_build()
         if self._load_worker is not None and self._load_worker.isRunning():
@@ -566,12 +636,156 @@ class MainWindow(QMainWindow):
             "MIDI Chord Lab",
             f"<h3>MIDI Chord Lab</h3>"
             f"<p>バージョン {__version__}</p>"
-            "<p>和声解析・コード編集・タイムライン・理論候補を一体化したデスクトップワークステーションです。</p>"
+            "<p>和声解析・コード編集・分析スタジオ・理論候補を一体化した"
+            "デスクトップ和声ワークステーションです。</p>"
             "<p><b>ショートカット</b><br>"
-            "Ctrl+O 開く · F11 全画面 · Esc 全画面終了<br>"
-            "Ctrl+Enter 再生 · Ctrl+. 停止 · Ctrl+\\ アシストパネル<br>"
-            "Ctrl+Shift+S MusicXML · Ctrl+Shift+M MIDI</p>",
+            "Ctrl+O 開く · Ctrl+S 保存 · Ctrl+Z / Ctrl+Y 元に戻す／やり直し<br>"
+            "Space 再生／停止 · Ctrl+Enter 再生 · Ctrl+. 停止<br>"
+            "F11 全画面 · Esc 全画面終了 · Ctrl+\\ 理論アシスト<br>"
+            "Ctrl+Shift+S MusicXML · Ctrl+Shift+M MIDI 書き出し · Ctrl+Shift+R レポート</p>",
         )
+
+    def _show_preferences(self) -> None:
+        dlg = PreferencesDialog(self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        if self._work_flat is None:
+            self._tempo.setValue(dlg.default_tempo_value())
+        if dlg.fullscreen_default() and not self.isFullScreen():
+            self.showFullScreen()
+            self._fullscreen_act.setChecked(True)
+        elif not dlg.fullscreen_default() and self.isFullScreen():
+            self._exit_fullscreen()
+        self._toggle_assist_panel(dlg.assist_visible())
+
+    def _current_snapshot(self) -> TimelineSnapshot:
+        return TimelineSnapshot(tuple(self._row_tuples()), tuple(self._row_ql))
+
+    def _push_history(self) -> None:
+        if self._work_flat is None:
+            return
+        self._edit_history.push(list(self._row_tuples()), list(self._row_ql))
+        self._update_undo_actions()
+
+    def _update_undo_actions(self) -> None:
+        on = self._work_flat is not None
+        self._undo_act.setEnabled(on and self._edit_history.can_undo())
+        self._redo_act.setEnabled(on and self._edit_history.can_redo())
+
+    def _restore_snapshot(self, snap: TimelineSnapshot) -> None:
+        assert self._work_flat is not None
+        self._row_ql = list(snap.row_ql)
+        rows = list(snap.rows)
+        self._work_flat = rebuild_stream_from_table(self._work_flat, rows, self._row_ql)
+        self._fill_table_from_work()
+        self._schedule_analysis_refresh()
+
+    def undo_edit(self) -> None:
+        if not self._edit_history.can_undo():
+            return
+        snap = self._edit_history.undo(self._current_snapshot())
+        if snap is not None:
+            self._restore_snapshot(snap)
+            self._mark_dirty()
+
+    def redo_edit(self) -> None:
+        if not self._edit_history.can_redo():
+            return
+        snap = self._edit_history.redo(self._current_snapshot())
+        if snap is not None:
+            self._restore_snapshot(snap)
+            self._mark_dirty()
+
+    def _mark_dirty(self) -> None:
+        if self._work_flat is None:
+            return
+        self._dirty = True
+        self._update_window_title()
+        self._save_act.setEnabled(True)
+
+    def _clear_dirty(self) -> None:
+        self._dirty = False
+        self._update_window_title()
+
+    def _update_window_title(self) -> None:
+        if self._current_path is None:
+            self.setWindowTitle("MIDI Chord Lab")
+            return
+        star = " *" if self._dirty else ""
+        self.setWindowTitle(f"MIDI Chord Lab — {self._current_path.name}{star}")
+
+    def _schedule_analysis_refresh(self) -> None:
+        if self._work_flat is None:
+            return
+        self._analysis_debounce.start()
+
+    def save_current_midi(self, *, silent: bool = False) -> bool:
+        if self._work_flat is None:
+            return False
+        if self._current_path is None:
+            self.export_midi_file()
+            return not self._dirty
+        try:
+            self._work_flat.write("midi", fp=str(self._current_path))
+            self._clear_dirty()
+            self.statusBar().showMessage(f"保存しました: {self._current_path.name}", 10000)
+            return True
+        except Exception:
+            if not silent:
+                QMessageBox.critical(self, "保存エラー", traceback.format_exc())
+            return False
+
+    def _insert_row_after(self, row: int) -> None:
+        if self._work_flat is None:
+            return
+        self._push_history()
+        rows = self._row_tuples()
+        ql = list(self._row_ql)
+        if not rows:
+            rows = [(0.0, "C")]
+            ql = [1.0]
+        else:
+            row = max(0, min(row, len(rows) - 1))
+            off = rows[row][0] + ql[row]
+            rows.insert(row + 1, (off, "C"))
+            ql.insert(row + 1, ql[row])
+        self._row_ql = ql
+        self._work_flat = rebuild_stream_from_table(self._work_flat, rows, self._row_ql)
+        self._fill_table_from_work()
+        self._mark_dirty()
+        self._schedule_analysis_refresh()
+
+    def _duplicate_row(self, row: int) -> None:
+        if self._work_flat is None or row < 0 or row >= len(self._row_ql):
+            return
+        self._push_history()
+        rows = self._row_tuples()
+        ql = list(self._row_ql)
+        off = rows[row][0] + ql[row]
+        label = rows[row][1]
+        rows.insert(row + 1, (off, label))
+        ql.insert(row + 1, ql[row])
+        self._row_ql = ql
+        self._work_flat = rebuild_stream_from_table(self._work_flat, rows, self._row_ql)
+        self._fill_table_from_work()
+        self._mark_dirty()
+        self._schedule_analysis_refresh()
+
+    def _delete_row(self, row: int) -> None:
+        if self._work_flat is None or self.table.rowCount() <= 1:
+            return
+        if row < 0 or row >= self.table.rowCount():
+            return
+        self._push_history()
+        rows = self._row_tuples()
+        ql = list(self._row_ql)
+        del rows[row]
+        del ql[row]
+        self._row_ql = ql
+        self._work_flat = rebuild_stream_from_table(self._work_flat, rows, self._row_ql)
+        self._fill_table_from_work()
+        self._mark_dirty()
+        self._schedule_analysis_refresh()
 
     def _labels(self) -> list[str]:
         out: list[str] = []
@@ -622,12 +836,14 @@ class MainWindow(QMainWindow):
         self._export_xml_act.setEnabled(on)
         self._export_midi_act.setEnabled(on)
         self._export_report_act.setEnabled(on)
+        self._save_act.setEnabled(on and self._dirty)
         self._btn_export_xml.setEnabled(on)
         self._btn_export_midi.setEnabled(on)
         self._btn_export_report.setEnabled(on)
         self._btn_play.setEnabled(on)
         self._btn_stop.setEnabled(on)
         self._tempo.setEnabled(on)
+        self._update_undo_actions()
 
     def _roman_for_row_element(self, el) -> str:
         return functional_label(el, self._detected_key)
@@ -807,6 +1023,9 @@ class MainWindow(QMainWindow):
         if path:
             try:
                 self._work_flat.write("midi", fp=path)
+                self._current_path = Path(path)
+                self._clear_dirty()
+                self._update_window_title()
                 self.statusBar().showMessage(f"MIDI 保存: {path}", 10000)
             except Exception:
                 QMessageBox.critical(self, "エラー", traceback.format_exc())
@@ -832,7 +1051,7 @@ class MainWindow(QMainWindow):
             cells = (
                 (COL_BEAT, self._elem_beat(el), read_only, self._table_font_mono),
                 (COL_OFFSET, f"{off:.2f}", read_only, self._table_font_mono),
-                (COL_DURATION, f"{ql:.2f}", read_only, self._table_font_mono),
+                (COL_DURATION, f"{ql:.2f}", editable, self._table_font_mono),
                 (COL_LABEL, label, editable, self._table_font),
                 (COL_ROMAN, roman, read_only, self._table_font_mono),
                 (COL_PITCHES, pitches, read_only, self._table_font_mono),
@@ -885,33 +1104,54 @@ class MainWindow(QMainWindow):
             self._melody_list.addItem(line)
 
     def _on_table_cell_changed(self, row: int, col: int) -> None:
-        if self._suppress_table or col != COL_LABEL or self._work_flat is None:
+        if self._suppress_table or self._work_flat is None:
+            return
+        if col not in (COL_LABEL, COL_DURATION):
             return
         item = self.table.item(row, col)
         if item is None:
             return
-        try:
-            _, mids = parse_chord_cell(item.text(), self._row_ql[row])
-        except Exception as e:
-            QMessageBox.warning(self, "表記エラー", f"解釈できません:\n{item.text()}\n\n{e}")
-            return
+        if col == COL_DURATION:
+            try:
+                ql = float(item.text().replace(",", "."))
+                if ql <= 0:
+                    raise ValueError("長さは正の数にしてください")
+            except Exception as e:
+                QMessageBox.warning(self, "長さ", f"解釈できません:\n{item.text()}\n\n{e}")
+                return
+        else:
+            try:
+                parse_chord_cell(item.text(), self._row_ql[row])
+            except Exception as e:
+                QMessageBox.warning(self, "表記エラー", f"解釈できません:\n{item.text()}\n\n{e}")
+                return
+        if not self._hist_cell_pushed:
+            self._push_history()
+            self._hist_cell_pushed = True
+        if col == COL_DURATION:
+            ql = float(item.text().replace(",", "."))
+            self._row_ql[row] = ql
         try:
             self._work_flat = rebuild_stream_from_table(self._work_flat, self._row_tuples(), self._row_ql)
-            pit = self.table.item(row, COL_PITCHES)
-            if pit is not None:
-                pit.setText(" ".join(m21_pitch.Pitch(m).nameWithOctave for m in mids))
-            el_new, _ = parse_chord_cell(item.text(), self._row_ql[row])
-            rom = self.table.item(row, COL_ROMAN)
-            if rom is not None:
-                rom.setText(self._roman_for_row_element(el_new))
-            self.piano.set_active_pitches(set(mids))
-            self._refresh_suggestions(row)
+            if col == COL_LABEL:
+                _, mids = parse_chord_cell(item.text(), self._row_ql[row])
+                pit = self.table.item(row, COL_PITCHES)
+                if pit is not None:
+                    pit.setText(" ".join(m21_pitch.Pitch(m).nameWithOctave for m in mids))
+                el_new, _ = parse_chord_cell(item.text(), self._row_ql[row])
+                rom = self.table.item(row, COL_ROMAN)
+                if rom is not None:
+                    rom.setText(self._roman_for_row_element(el_new))
+                self.piano.set_active_pitches(set(mids))
+                self._refresh_suggestions(row)
             self._update_timeline_stats()
-            self._refresh_analysis_views()
+            self._mark_dirty()
+            self._schedule_analysis_refresh()
         except Exception:
             QMessageBox.critical(self, "エラー", traceback.format_exc())
 
     def _on_table_selection_changed(self) -> None:
+        self._hist_cell_pushed = False
         if self._playback_highlighting:
             return
         rows = self.table.selectionModel().selectedRows()
@@ -964,6 +1204,7 @@ class MainWindow(QMainWindow):
         self._apply_cell_text(row, new_text)
 
     def _apply_cell_text(self, row: int, txt: str) -> None:
+        self._push_history()
         self._suppress_table = True
         self.table.blockSignals(True)
         self.table.item(row, COL_LABEL).setText(txt)
@@ -984,7 +1225,8 @@ class MainWindow(QMainWindow):
             pass
         self._refresh_suggestions(row)
         self._update_timeline_stats()
-        self._refresh_analysis_views()
+        self._mark_dirty()
+        self._schedule_analysis_refresh()
 
     def play_transport(self) -> None:
         if self._work_flat is None:
@@ -1088,6 +1330,9 @@ class MainWindow(QMainWindow):
             self._detected_key = payload.key_obj
             self._key_display.setText(payload.key_text)
             self._note_events = list(payload.note_events)
+            self._edit_history.clear()
+            self._dirty = False
+            self._tempo.setValue(payload.bpm)
             add_recent_file(payload.path)
             self._fill_table_from_work()
             self._chord_list.clear()
@@ -1101,7 +1346,7 @@ class MainWindow(QMainWindow):
             self._header_badge.setObjectName("HeaderBadgeActive")
             self._header_badge.style().unpolish(self._header_badge)
             self._header_badge.style().polish(self._header_badge)
-            self.setWindowTitle(f"MIDI Chord Lab — {name}")
+            self._update_window_title()
             self._status_mode.setText("編集中")
             self.statusBar().showMessage(f"{name} を読み込みました", 12000)
             self._start_analysis_build()
@@ -1113,6 +1358,8 @@ class MainWindow(QMainWindow):
 
     def _reset_session(self) -> None:
         self._stop_analysis_build()
+        self._edit_history.clear()
+        self._dirty = False
         self._original_score = None
         self._work_flat = None
         self._current_path = None

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -19,10 +22,12 @@ class DropZone(QFrame):
     """ドラッグ＆ドロップ案内エリア（クリックでファイルを開く）。"""
 
     clicked = pyqtSignal()
+    file_dropped = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("DropZone")
+        self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(96)
@@ -43,6 +48,25 @@ class DropZone(QFrame):
     def mousePressEvent(self, event):
         self.clicked.emit()
         super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        for u in event.mimeData().urls():
+            if Path(u.toLocalFile()).suffix.lower() in {".mid", ".midi"}:
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        for u in event.mimeData().urls():
+            p = Path(u.toLocalFile())
+            if p.suffix.lower() in {".mid", ".midi"}:
+                self.file_dropped.emit(str(p))
+                event.acceptProposedAction()
+                return
+        event.ignore()
 
 
 def _feature_chip(title: str, desc: str) -> QFrame:
@@ -67,6 +91,7 @@ class WelcomePage(QWidget):
     """プロジェクト未読込時のランディング（スクロール・中央配置・伸縮対応）。"""
 
     open_requested = pyqtSignal()
+    file_dropped = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -115,6 +140,7 @@ class WelcomePage(QWidget):
 
         self._drop = DropZone()
         self._drop.clicked.connect(self.open_requested.emit)
+        self._drop.file_dropped.connect(self.file_dropped.emit)
 
         chips_host = QWidget()
         chips_host.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)

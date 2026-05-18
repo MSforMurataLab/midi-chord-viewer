@@ -344,6 +344,14 @@ def _default_diatonic_candidates(
     return out
 
 
+def _key_for_rules(key: KeySpec) -> tuple[KeySpec, str]:
+    """マイナーキーは相対長調のルール表で解析（表示用プレフィックス付き）。"""
+    if key.mode == "minor":
+        rel = KeySpec(root_pc=(key.root_pc + 3) % 12, mode="major")
+        return rel, "相対長調 · "
+    return key, ""
+
+
 def rule_based_chord_suggestions(
     key: KeySpec,
     target: ChordSpec,
@@ -356,19 +364,24 @@ def rule_based_chord_suggestions(
     ルール適用 → 実コード復元 → フィルタ。
     表示形式: 「Am7  —  機能置換（トニック）→ vi7」
     """
+    rules_key, prefix = _key_for_rules(key)
     raw: list[tuple[str, str, bool, int]] = []
 
     if target.chord_type == "note":
-        for fig, name, conflict in _note_row_candidates(key, target, melody_midi):
-            raw.append((fig, name, conflict, 0))
+        for fig, name, conflict in _note_row_candidates(rules_key, target, melody_midi):
+            raw.append((fig, prefix + name, conflict, 0))
     else:
-        for fig, name, conflict in _apply_major_rules(key, target, melody_midi):
-            raw.append((fig, name, conflict, 1))
-        for fig, name, conflict in _secondary_dominant_candidates(key, target, next_chord, melody_midi):
-            raw.append((fig, name, conflict, 2))
+        for fig, name, conflict in _apply_major_rules(rules_key, target, melody_midi):
+            raw.append((fig, prefix + name, conflict, 1))
+        for fig, name, conflict in _secondary_dominant_candidates(
+            rules_key, target, next_chord, melody_midi
+        ):
+            raw.append((fig, prefix + name, conflict, 2))
         if not any(r[3] == 1 for r in raw):
-            for fig, name, conflict in _default_diatonic_candidates(key, target, melody_midi):
-                raw.append((fig, name, conflict, 0))
+            for fig, name, conflict in _default_diatonic_candidates(
+                rules_key, target, melody_midi
+            ):
+                raw.append((fig, prefix + name, conflict, 0))
 
     seen: set[str] = set()
     ordered: list[tuple[str, str, bool]] = []

@@ -40,3 +40,23 @@ def fullscreen_default() -> bool:
 
 def set_fullscreen_default(on: bool) -> None:
     _settings().setValue("fullscreen_default", on)
+
+
+def default_tempo() -> int:
+    try:
+        v = int(_settings().value("default_tempo", 120))
+        return max(40, min(208, v))
+    except (TypeError, ValueError):
+        return 120
+
+
+def set_default_tempo(bpm: int) -> None:
+    _settings().setValue("default_tempo", max(40, min(208, int(bpm))))
+
+
+def assist_panel_visible_default() -> bool:
+    return bool(_settings().value("assist_panel_visible", True))
+
+
+def set_assist_panel_visible_default(on: bool) -> None:
+    _settings().setValue("assist_panel_visible", on)
