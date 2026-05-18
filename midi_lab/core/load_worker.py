@@ -8,6 +8,9 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+# progress 表示後に UI スレッドへ制御を返す短い待機（ミリ秒）
+_PROGRESS_YIELD_MS = 15
+
 from midi_lab.core.harmony import detect_key_for_score
 from midi_lab.core.note_events import NoteEvent, collect_note_events
 from midi_lab.core.score import build_flat_work_stream, load_score
@@ -43,7 +46,12 @@ class MidiLoadWorker(QThread):
             if kobj is None:
                 ktxt, kobj = detect_key_for_score(work)
             self.progress.emit("パフォーマンスデータを抽出しています…")
+            if self.isInterruptionRequested():
+                return
+            QThread.msleep(_PROGRESS_YIELD_MS)
             notes = tuple(collect_note_events(score))
+            if self.isInterruptionRequested():
+                return
             payload = LoadedScore(
                 path=self._path,
                 score=score,

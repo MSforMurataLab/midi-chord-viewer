@@ -18,6 +18,10 @@ from midi_lab.core.chord_rules import (
 
 _UNIDENTIFIED_RE = re.compile(r"cannot be identified", re.I)
 
+# chord_figure_from_chord の結果キャッシュ（声部進行・表の重複和音向け）
+_CHORD_FIGURE_CACHE: dict[tuple[int, ...], str] = {}
+_CHORD_FIGURE_CACHE_MAX = 8192
+
 # (ルートからの半音集合, サフィックス, 優先度) — music21 失敗時のテンプレート照合
 _CHORD_TEMPLATES: list[tuple[frozenset[int], str, int]] = [
     (frozenset({7}), "5", 8),
@@ -200,19 +204,34 @@ def _music21_figure_with_root_guesses(ch: m21_chord.Chord) -> str | None:
     return None
 
 
+def clear_chord_figure_cache() -> None:
+    _CHORD_FIGURE_CACHE.clear()
+
+
+def _store_chord_figure(cache_key: tuple[int, ...], figure: str) -> str:
+    if len(_CHORD_FIGURE_CACHE) < _CHORD_FIGURE_CACHE_MAX:
+        _CHORD_FIGURE_CACHE[cache_key] = figure
+    return figure
+
+
 def chord_figure_from_chord(ch: m21_chord.Chord, ky: m21_key.Key | None = None) -> str:
     """構成音からコード記号を推定（music21 + テンプレート + add 表記）。"""
+    cache_key = tuple(sorted(p.midi for p in ch.pitches))
+    cached = _CHORD_FIGURE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     fig = _music21_figure(ch)
     if fig:
-        return fig
+        return _store_chord_figure(cache_key, fig)
 
     fig = _infer_figure_by_templates(ch)
     if fig:
-        return _normalize_figure(fig)
+        return _store_chord_figure(cache_key, _normalize_figure(fig))
 
     fig = _music21_figure_with_root_guesses(ch)
     if fig:
-        return fig
+        return _store_chord_figure(cache_key, fig)
 
     # キー文脈でルート推定を再試行
     if ky is not None:
@@ -227,11 +246,28 @@ def chord_figure_from_chord(ch: m21_chord.Chord, ky: m21_key.Key | None = None) 
                     trial.root(rp)
                     fig = _music21_figure(trial) or _music21_figure_with_root_guesses(trial)
                     if fig:
-                        return fig
+                        return _store_chord_figure(cache_key, fig)
         except Exception:
             pass
 
-    return _normalize_figure(_infer_figure_bass_add(ch))
+    return _store_chord_figure(cache_key, _normalize_figure(_infer_figure_bass_add(ch)))
+
+
+def voice_leading_label(el: m21_chord.Chord | m21_note.Note, ky: m21_key.Key | None = None) -> str:
+    """声部進行表向けの軽量ラベル（重い chord 推定を避ける）。"""
+    if isinstance(el, m21_note.Note):
+        return el.nameWithOctave
+    if isinstance(el, m21_chord.Chord):
+        ps = sorted(el.pitches, key=lambda p: p.midi)
+        if len(ps) <= 1:
+            return ps[0].nameWithOctave if ps else "?"
+        cache_key = tuple(p.midi for p in ps)
+        cached = _CHORD_FIGURE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        # 構成音表記（即時）— 必要ならキャッシュ済みコード記号に差し替え可能
+        return "–".join(p.nameWithOctave for p in ps)
+    return str(el)
 
 
 def event_display_label(el: m21_chord.Chord | m21_note.Note, ky: m21_key.Key | None = None) -> str:

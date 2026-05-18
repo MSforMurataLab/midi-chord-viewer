@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from music21 import chord as m21_chord
 from music21 import note as m21_note
 
+_NOTE_CLASSES = (m21_note.Note, m21_chord.Chord)
+
 
 @dataclass(frozen=True)
 class NoteEvent:
@@ -29,8 +31,9 @@ def _append_notes_from_stream(
     part_index: int,
     out: list[NoteEvent],
 ) -> None:
-    """flatten 済みストリームからノートを収集（パート先頭からの絶対拍）。"""
-    for el in stream.flatten().notes:
+    """パートを 1 回だけ flatten し、曲頭からの絶対拍でノートを収集。"""
+    flat = stream.flatten()
+    for el in flat.getElementsByClass(_NOTE_CLASSES):
         off = float(el.offset)
         ql = float(el.quarterLength or 0.25)
         if isinstance(el, m21_note.Note):
@@ -47,8 +50,11 @@ def collect_note_events(score) -> list[NoteEvent]:
     parts = list(score.parts) if getattr(score, "parts", None) else None
     if parts:
         for pi, part in enumerate(parts):
+            if not part:
+                continue
             _append_notes_from_stream(part, pi, events)
     elif hasattr(score, "flatten"):
         _append_notes_from_stream(score, 0, events)
-    events.sort(key=lambda e: (e.offset, e.midi, e.part_index))
+    if len(events) > 1:
+        events.sort(key=lambda e: (e.offset, e.midi, e.part_index))
     return events

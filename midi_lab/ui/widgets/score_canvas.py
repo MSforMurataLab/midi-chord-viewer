@@ -4,12 +4,16 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
+
 class ScoreCanvas(QWidget):
+    """matplotlib Figure を Qt 領域いっぱいに表示するキャンバス。"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
@@ -18,7 +22,7 @@ class ScoreCanvas(QWidget):
         self._toolbar = None
         self.show_placeholder()
 
-    def _clear_widgets(self):
+    def _clear_widgets(self) -> None:
         while self._layout.count():
             item = self._layout.takeAt(0)
             w = item.widget()
@@ -30,7 +34,21 @@ class ScoreCanvas(QWidget):
             plt.close(self._figure)
             self._figure = None
 
-    def show_placeholder(self):
+    def _sync_figure_size(self) -> None:
+        """ウィジェットサイズに Figure を合わせ、グラフを中央の小さな塊にしない。"""
+        if self._figure is None or self._canvas is None:
+            return
+        dpi = self._figure.get_dpi()
+        w_px = max(self._canvas.width(), 480)
+        h_px = max(self._canvas.height(), 360)
+        self._figure.set_size_inches(w_px / dpi, h_px / dpi, forward=True)
+        self._canvas.draw_idle()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_figure_size()
+
+    def show_placeholder(self) -> None:
         self._clear_widgets()
         wrap = QFrame()
         wrap.setObjectName("PlotPlaceholder")
@@ -52,13 +70,17 @@ class ScoreCanvas(QWidget):
         v.addWidget(b)
         self._layout.addWidget(wrap)
 
-    def set_figure(self, figure):
-        """matplotlib Figure を表示（カスタム・ピアノロール用）。"""
+    def set_figure(self, figure) -> None:
+        """matplotlib Figure を表示（カスタム・ピアノロール / パフォーマンス用）。"""
         self._clear_widgets()
         self._figure = figure
         self._canvas = FigureCanvasQTAgg(self._figure)
-        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self._toolbar = NavigationToolbar(self._canvas, self)
         self._toolbar.setObjectName("PlotToolBar")
         self._layout.addWidget(self._toolbar)
         self._layout.addWidget(self._canvas, stretch=1)
+        QTimer.singleShot(0, self._sync_figure_size)

@@ -36,6 +36,7 @@ from music21 import note as m21_note
 from music21 import pitch as m21_pitch
 from music21 import stream as m21_stream
 
+from midi_lab.core.analysis_build_worker import AnalysisBuildWorker, AnalysisResult
 from midi_lab.core.analysis_report import build_analysis_html
 from midi_lab.core.functional_harmony import functional_label
 from midi_lab.core.load_worker import LoadedScore, MidiLoadWorker
@@ -49,6 +50,7 @@ from midi_lab.core.pianoroll_plot import build_pianoroll_figure_from_notes
 from midi_lab.core.settings import add_recent_file, recent_files, set_fullscreen_default
 from midi_lab.core.voice_leading import analyze_voice_leading, format_motions
 from midi_lab.core.harmony import (
+    clear_chord_figure_cache,
     detect_key_for_score,
     event_display_label,
     harmony_chord_for_melody_at_row,
@@ -56,6 +58,7 @@ from midi_lab.core.harmony import (
     melody_midi_from_previous,
     parse_chord_cell,
     targeted_chord_suggestions,
+    voice_leading_label,
 )
 from midi_lab.core.playback import PlaybackThread, stop_audio_output
 from midi_lab.core.score import build_playback_timeline, collect_harmony_events, rebuild_stream_from_table
@@ -96,6 +99,7 @@ class MainWindow(QMainWindow):
         self._playback: PlaybackThread | None = None
         self._playback_highlighting = False
         self._load_worker: MidiLoadWorker | None = None
+        self._analysis_worker: AnalysisBuildWorker | None = None
         self._assist_visible = True
         self._assist_width = 300
         self._body_split: QSplitter | None = None
@@ -518,6 +522,7 @@ class MainWindow(QMainWindow):
 
         log_stack("MainWindow.closeEvent")
         self.stop_transport()
+        self._stop_analysis_build()
         if self._load_worker is not None and self._load_worker.isRunning():
             self._load_worker.requestInterruption()
             self._load_worker.wait(3000)
@@ -643,7 +648,7 @@ class MainWindow(QMainWindow):
         harmony = collect_harmony_events(self._work_flat)
         self._voice_steps = analyze_voice_leading(
             harmony,
-            lambda el: event_display_label(el, self._detected_key),
+            lambda el: voice_leading_label(el, self._detected_key),
         )
         vl_rows = [
             (
@@ -672,6 +677,59 @@ class MainWindow(QMainWindow):
             self._perf_canvas.show_placeholder()
         if hasattr(self, "_voice_panel"):
             self._voice_panel.clear_data()
+
+    def _stop_analysis_build(self) -> None:
+        if self._analysis_worker is not None and self._analysis_worker.isRunning():
+            self._analysis_worker.requestInterruption()
+            self._analysis_worker.wait(5000)
+        self._analysis_worker = None
+
+    def _start_analysis_build(self) -> None:
+        if self._work_flat is None:
+            self._loading.hide_loading()
+            return
+        self._stop_analysis_build()
+        self._clear_analysis_views()
+        self._loading.show_loading("分析グラフを描画中", "準備しています…")
+        self._analysis_worker = AnalysisBuildWorker(
+            self._note_events,
+            self._work_flat,
+            self._detected_key,
+            self,
+        )
+        self._analysis_worker.progress.connect(
+            lambda detail: self._loading.show_loading("分析グラフを描画中", detail)
+        )
+        self._analysis_worker.completed.connect(self._apply_analysis_result)
+        self._analysis_worker.failed.connect(self._on_analysis_failed)
+        self._analysis_worker.finished.connect(self._on_analysis_worker_finished)
+        self._analysis_worker.start()
+
+    def _on_analysis_worker_finished(self) -> None:
+        self._analysis_worker = None
+
+    def _on_analysis_failed(self, tb: str) -> None:
+        self._loading.hide_loading()
+        self._clear_analysis_views()
+        QMessageBox.warning(
+            self,
+            "分析グラフ",
+            "分析グラフの生成に失敗しました。タイムラインは利用できます。\n\n" + tb[:1200],
+        )
+
+    def _apply_analysis_result(self, result: AnalysisResult) -> None:
+        self._loading.hide_loading()
+        self._voice_steps = list(result.voice_steps)
+        if result.pianoroll_figure is not None:
+            self._pianoroll_canvas.set_figure(result.pianoroll_figure)
+        else:
+            self._pianoroll_canvas.show_placeholder()
+        if result.perf_figure is not None:
+            self._perf_canvas.set_figure(result.perf_figure)
+        else:
+            self._perf_canvas.show_placeholder()
+        self._voice_panel.populate(list(result.voice_rows))
+        self._voice_panel.set_summary(result.voice_summary)
 
     def export_analysis_report(self) -> None:
         if self._work_flat is None or self._current_path is None:
@@ -998,6 +1056,7 @@ class MainWindow(QMainWindow):
     def load_file(self, path: str) -> None:
         if self._load_worker is not None and self._load_worker.isRunning():
             return
+        self._stop_analysis_build()
         self.stop_transport()
         name = Path(path).name
         self.statusBar().showMessage(f"読み込み中: {name}…")
@@ -1015,13 +1074,14 @@ class MainWindow(QMainWindow):
         self._load_worker = None
 
     def _on_load_failed(self, tb: str) -> None:
+        self._stop_analysis_build()
         self._loading.hide_loading()
         self._reset_session()
         QMessageBox.critical(self, "読み込みエラー", tb)
 
     def _apply_loaded_score(self, payload: LoadedScore) -> None:
-        self._loading.hide_loading()
         try:
+            clear_chord_figure_cache()
             self._original_score = payload.score
             self._work_flat = payload.work_flat
             self._current_path = Path(payload.path)
@@ -1030,7 +1090,6 @@ class MainWindow(QMainWindow):
             self._note_events = list(payload.note_events)
             add_recent_file(payload.path)
             self._fill_table_from_work()
-            self._refresh_analysis_views()
             self._chord_list.clear()
             self._melody_list.clear()
             self.piano.clear_active()
@@ -1045,11 +1104,15 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"MIDI Chord Lab — {name}")
             self._status_mode.setText("編集中")
             self.statusBar().showMessage(f"{name} を読み込みました", 12000)
+            self._start_analysis_build()
         except Exception:
+            self._stop_analysis_build()
+            self._loading.hide_loading()
             self._reset_session()
             QMessageBox.critical(self, "表示エラー", traceback.format_exc())
 
     def _reset_session(self) -> None:
+        self._stop_analysis_build()
         self._original_score = None
         self._work_flat = None
         self._current_path = None

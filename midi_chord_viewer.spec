@@ -56,6 +56,8 @@ a = Analysis(
         "midi_lab.core.note_events",
         "midi_lab.core.pianoroll_plot",
         "midi_lab.core.performance_analytics",
+        "mpl_toolkits.axes_grid1",
+        "midi_lab.core.analysis_build_worker",
         "midi_lab.core.analysis_report",
         "midi_lab.core.functional_harmony",
         "midi_lab.core.voice_leading",

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from midi_lab.core.note_events import NoteEvent
 from midi_lab.core.plotting import plot_font_family, theme_matplotlib_figure
@@ -91,22 +92,25 @@ def report_summary_text(report: PerformanceReport) -> str:
     )
 
 
+def _style_axis(ax, *, title: str, xlabel: str = "", ylabel: str = "") -> None:
+    ax.set_title(title, pad=14, fontsize=11)
+    if xlabel:
+        ax.set_xlabel(xlabel, labelpad=8, fontsize=9)
+    if ylabel:
+        ax.set_ylabel(ylabel, labelpad=8, fontsize=9)
+
+
 def build_performance_dashboard_figure(
     events: list[NoteEvent],
     report: PerformanceReport,
-    figsize: tuple[float, float] = (13.0, 9.5),
+    figsize: tuple[float, float] = (12.0, 10.0),
 ) -> Figure:
-    fig = plt.figure(figsize=figsize, facecolor=dt.MPL_BG)
-    gs = fig.add_gridspec(
-        2,
-        2,
-        hspace=0.52,
-        wspace=0.40,
-        left=0.08,
-        right=0.96,
-        top=0.90,
-        bottom=0.09,
-    )
+    """2×2 ダッシュボード（constrained_layout + サブプロット内 colorbar）。"""
+    fig = plt.figure(figsize=figsize, facecolor=dt.MPL_BG, layout="constrained")
+    # hspace を抑えてプロット領域を大きく（ScoreCanvas が実サイズに追従）
+    fig.set_constrained_layout_pads(w_pad=0.04, h_pad=0.06, wspace=0.10, hspace=0.22)
+
+    gs = fig.add_gridspec(2, 2, height_ratios=(1.0, 1.0), width_ratios=(1.0, 1.0))
     ax_vel = fig.add_subplot(gs[0, 0])
     ax_pc = fig.add_subplot(gs[0, 1])
     ax_den = fig.add_subplot(gs[1, 0])
@@ -130,37 +134,52 @@ def build_performance_dashboard_figure(
     t0 = float(offsets.min())
     t1 = float(max(e.offset + e.quarter_length for e in events))
 
+    # --- ベロシティ（colorbar はサブプロット右端に内付け） ---
     sc = ax_vel.scatter(
-        offsets, vels, c=midis, cmap="cool", s=18, alpha=0.75,
-        edgecolors=dt.BORDER_STRONG, linewidths=0.3,
+        offsets, vels, c=midis, cmap="cool", s=14, alpha=0.75,
+        edgecolors=dt.BORDER_STRONG, linewidths=0.25,
     )
-    ax_vel.axhline(report.mean_velocity, color=dt.ACCENT, linestyle="--", linewidth=1.2, alpha=0.9)
-    ax_vel.set_title("ベロシティ推移", pad=12)
-    ax_vel.set_xlabel("拍（曲頭から）", labelpad=6)
-    ax_vel.set_ylabel("ベロシティ (1–127)", labelpad=6)
+    ax_vel.axhline(
+        report.mean_velocity, color=dt.ACCENT, linestyle="--", linewidth=1.2, alpha=0.9,
+    )
     ax_vel.set_ylim(0, 128)
-    cbar = fig.colorbar(sc, ax=ax_vel, label="音高 (MIDI)", pad=0.06, fraction=0.05)
+    ax_vel.margins(x=0.02, y=0.04)
+    _style_axis(ax_vel, title="ベロシティ推移", xlabel="拍（曲頭から）", ylabel="ベロシティ")
+    divider = make_axes_locatable(ax_vel)
+    cax = divider.append_axes("right", size="4.5%", pad=0.12)
+    cbar = fig.colorbar(sc, cax=cax)
+    cbar.set_label("音高 (MIDI)", fontsize=8, labelpad=6)
+    cbar.ax.tick_params(labelsize=8)
     cbar.ax.yaxis.label.set_fontfamily(plot_font_family())
 
+    # --- ピッチクラス ---
     pcs = midis % 12
     names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     counts = np.bincount(pcs, minlength=12)
     colors = [dt.ACCENT if i in {0, 4, 7} else dt.HARMONY for i in range(12)]
     ax_pc.bar(names, counts, color=colors, edgecolor=dt.BORDER_DEFAULT, linewidth=0.5)
-    ax_pc.set_title("ピッチクラス分布", pad=12)
-    ax_pc.set_ylabel("ノート数", labelpad=6)
-    ax_pc.tick_params(axis="x", rotation=45)
+    _style_axis(ax_pc, title="ピッチクラス分布", ylabel="ノート数")
+    ax_pc.tick_params(axis="x", rotation=45, labelsize=8, pad=2)
+    ax_pc.margins(x=0.02)
 
+    # --- 密度 ---
     duration = max(t1 - t0, 1.0)
     n_bins = max(int(np.ceil(duration)) + 1, 4)
     density, edges = np.histogram(offsets, bins=n_bins, range=(t0, t1 + 1e-6))
     centers = (edges[:-1] + edges[1:]) / 2
     bar_w = max((edges[1] - edges[0]) * 0.85, 0.1) if len(edges) > 1 else 0.85
-    ax_den.bar(centers, density, width=bar_w, color=dt.PLAY, alpha=0.85, edgecolor=dt.BORDER_DEFAULT)
-    ax_den.set_title("拍あたりノート密度", pad=12)
-    ax_den.set_xlabel("拍（曲頭から）", labelpad=6)
-    ax_den.set_ylabel("ノート数", labelpad=6)
+    ax_den.bar(
+        centers, density, width=bar_w, color=dt.PLAY, alpha=0.85, edgecolor=dt.BORDER_DEFAULT,
+    )
+    _style_axis(
+        ax_den,
+        title="拍あたりノート密度",
+        xlabel="拍（曲頭から）",
+        ylabel="ノート数",
+    )
+    ax_den.margins(x=0.02, y=0.06)
 
+    # --- レジスター（凡例は円グラフ下・axes 内） ---
     reg_labels = ["低音 (<C3)", "中音 (C3–B4)", "高音 (≥C5)"]
     reg_vals = [report.low_register_pct, report.mid_register_pct, report.high_register_pct]
     reg_colors = ["#6366f1", dt.ACCENT, "#f59e0b"]
@@ -171,29 +190,38 @@ def build_performance_dashboard_figure(
         colors=reg_colors,
         autopct="%1.0f%%",
         startangle=90,
-        pctdistance=0.72,
+        pctdistance=0.68,
+        radius=0.82,
         textprops={"color": dt.TEXT_PRIMARY, "fontsize": 9, "fontfamily": pie_font},
-    )
-    ax_reg.legend(
-        wedges,
-        reg_labels,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        fontsize=9,
-        frameon=False,
     )
     for t in autotexts:
         t.set_color(dt.BG_DEEP)
         t.set_fontweight("bold")
-    ax_reg.set_title("レジスター分布", pad=12)
+    ax_reg.set_title("レジスター分布", pad=14, fontsize=11)
+    ax_reg.legend(
+        wedges,
+        reg_labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.02),
+        ncol=3,
+        fontsize=8,
+        frameon=False,
+        borderaxespad=0.0,
+    )
+    ax_reg.set_aspect("equal", adjustable="box")
 
     fig.suptitle(
         "パフォーマンス分析",
         color=dt.TEXT_PRIMARY,
         fontsize=13,
         fontweight="bold",
-        y=0.97,
         fontfamily=plot_font_family(),
     )
+    if hasattr(fig, "get_layout_engine") and fig.get_layout_engine() is not None:
+        try:
+            fig.get_layout_engine().set(rect=(0.0, 0.0, 1.0, 0.97))
+        except Exception:
+            pass
+
     theme_matplotlib_figure(fig)
     return fig
