@@ -5,7 +5,9 @@ use crate::midi::event::{LiveMidiEvent, MidiEventKind};
 use crate::midi::ring::MidiRingBuffer;
 use crate::midi::scheduler::MidiScheduler;
 use crate::midi::timeline::{sec_to_ql, MidiTimeline};
-use crate::render::scene::{pack_frame, SceneParams, VisualStyle};
+use crate::render::scene::{
+    build_scene_uniform, compose_gpu_scene, pack_spectrum_gpu, SceneParams, VisualStyle,
+};
 use crate::render::spectrum_anim::SpectrumAnimator;
 use crate::render::WgpuRenderer;
 
@@ -26,7 +28,7 @@ pub struct VisualizerEngine {
     style_blend_t: f32,
     track_colors: bool,
     particle_amount: f32,
-    sustain_extend: f64,
+    sustain_extend_ql: f64,
     sustain_pedal: bool,
     audio_latency_ms: f64,
     export_clock: Option<DeterministicClock>,
@@ -58,7 +60,7 @@ impl VisualizerEngine {
             style_blend_t: 1.0,
             track_colors: true,
             particle_amount: 1.0,
-            sustain_extend: 0.0,
+            sustain_extend_ql: 0.0,
             sustain_pedal: false,
             audio_latency_ms: 0.0,
             export_clock: None,
@@ -89,6 +91,7 @@ impl VisualizerEngine {
         self.note_vel_last = [0.0; 128];
         self.live_vel = [0; 128];
         self.vel_edge_warmup = 3;
+        self.rebuild_gpu_instances();
     }
 
     pub fn set_transport(&mut self, t_ql: f64, bpm: f64, window_sec: f64, speed: f64) {
@@ -104,11 +107,15 @@ impl VisualizerEngine {
             self.style_prev = self.style;
             self.style = new;
             self.style_blend_t = 0.0;
+            self.rebuild_gpu_instances();
         }
     }
 
     pub fn set_track_colors(&mut self, on: bool) {
-        self.track_colors = on;
+        if self.track_colors != on {
+            self.track_colors = on;
+            self.rebuild_gpu_instances();
+        }
     }
 
     pub fn set_particle_amount(&mut self, amount: f32) {
@@ -138,10 +145,11 @@ impl VisualizerEngine {
     }
 
     pub fn tick(&mut self, dt_sec: f32) {
+        let dt_ql = sec_to_ql(dt_sec as f64, self.bpm);
         if self.sustain_pedal {
-            self.sustain_extend = (self.sustain_extend + dt_sec as f64 * 1.2).min(2.5);
+            self.sustain_extend_ql = (self.sustain_extend_ql + dt_ql * 1.2).min(2.5);
         } else {
-            self.sustain_extend = (self.sustain_extend - dt_sec as f64 * 1.5).max(0.0);
+            self.sustain_extend_ql = (self.sustain_extend_ql - dt_ql * 1.5).max(0.0);
         }
         self.advance_style_blend(dt_sec);
         if self.style == VisualStyle::Spectrum {
@@ -160,6 +168,11 @@ impl VisualizerEngine {
             self.style_prev = self.style;
             self.style_blend_t = 1.0;
         }
+    }
+
+    fn rebuild_gpu_instances(&mut self) {
+        let instances = compose_gpu_scene(&self.timeline, self.style, self.track_colors);
+        self.renderer.upload_instances(&instances);
     }
 
     fn drain_live_midi(&mut self) {
@@ -246,28 +259,29 @@ impl VisualizerEngine {
             kb_ratio: 0.14,
             aspect,
             track_colors: self.track_colors,
-            sustain_extend: self.sustain_extend,
+            sustain_extend: self.sustain_extend_ql,
             style: self.style,
         };
 
-        let spec_ref = if self.style == VisualStyle::Spectrum {
-            Some(&self.spectrum)
-        } else {
-            None
-        };
-
+        let (y_lo, y_hi) = self.timeline.y_range();
         let style_prev = if self.style_blend_t < 1.0 {
             self.style_prev
         } else {
             self.style
         };
-        let (scene, instances, spec_buf) = pack_frame(
-            &self.timeline,
+        let scene = build_scene_uniform(
             &params,
-            spec_ref,
+            self.timeline.duration_ql,
+            y_lo as f32,
+            y_hi as f32,
             style_prev,
             self.style_blend_t,
         );
+
+        let mut spec_buf = [0.0f32; crate::render::SPECTRUM_FLOATS];
+        if self.style == VisualStyle::Spectrum {
+            spec_buf = pack_spectrum_gpu(&self.spectrum, y_lo, y_hi);
+        }
 
         let mut curr_vel = [0.0f32; 128];
         self.fill_note_velocities(&mut curr_vel);
@@ -282,7 +296,6 @@ impl VisualizerEngine {
 
         self.render_frame_idx = self.render_frame_idx.wrapping_add(1);
         match self.renderer.render(
-            &instances,
             &scene,
             &spec_buf,
             &curr_vel,
@@ -303,17 +316,20 @@ impl VisualizerEngine {
         fps: u32,
         width: u32,
         height: u32,
+        ffmpeg_exe: &str,
     ) -> Result<u32, String> {
         let fps = fps.clamp(12, 60);
         let w = width.max(64);
         let h = height.max(64);
         self.resize(w, h);
 
-        let dur_sec = self.timeline.duration_ql * 60.0 / self.bpm.max(20.0);
+        let tail_ql = self.window_ql() * 0.35;
+        let dur_ql = self.timeline.duration_ql + tail_ql;
+        let dur_sec = dur_ql * 60.0 / self.bpm.max(20.0);
         let n_frames = (dur_sec * fps as f64).ceil() as u32;
         let n_frames = n_frames.max(1);
 
-        let mut writer = FfmpegWriterThread::start(path, w, h, fps)?;
+        let mut writer = FfmpegWriterThread::start(ffmpeg_exe, path, w, h, fps)?;
         self.begin_export(fps);
         let dt = 1.0 / fps as f32;
 

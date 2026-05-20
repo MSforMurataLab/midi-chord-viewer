@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -16,6 +17,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -29,7 +31,7 @@ from midi_lab.visualizer.engine import VisualizerEngine
 from midi_lab.visualizer.midi_input import MidiInputWorker, list_input_ports
 from midi_lab.visualizer.styles import STYLES, STYLE_ORDER
 from midi_lab.visualizer.timeline import ql_to_sec
-from midi_lab.core.visualizer_export_worker import VideoExportWorker
+from midi_lab.visualizer.export import export_png_sequence, export_video
 
 VIDEO_FILTER = "動画 (*.mp4 *.mov *.avi);;MP4 (*.mp4);;QuickTime (*.mov);;AVI (*.avi)"
 PNG_FILTER = "PNG 連番フォルダ"
@@ -41,7 +43,7 @@ class VisualizerPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._events: list[NoteEvent] = []
-        self._export_worker: VideoExportWorker | None = None
+        self._export_saved_animating = False
         self._midi_in: MidiInputWorker | None = None
         self._live_ql = 0.0
         self._playback_active = False
@@ -394,45 +396,79 @@ class VisualizerPanel(QWidget):
         if path:
             self._start_export(path, png=True)
 
+    def _pause_canvas_for_export(self) -> None:
+        """wgpu はメインスレッド専用 — 書き出し中はライブ描画を止める。"""
+        self._export_saved_animating = bool(
+            getattr(self._canvas, "_animating", False) and self._playback_active
+        )
+        self._canvas.set_animating(False)
+
+    def _resume_canvas_after_export(self) -> None:
+        if self._export_saved_animating and self._events:
+            self._canvas.set_animating(True)
+        self._export_saved_animating = False
+
     def _start_export(self, path: str, *, png: bool) -> None:
-        if self._export_worker and self._export_worker.isRunning():
-            return
         w, h = self._res_combo.currentData() or (1280, 720)
-        self._progress.setVisible(True)
+        fps = self._fps_spin.value()
+        eng = self._clone_engine_for_export()
+
         self._btn_export.setEnabled(False)
         self._btn_png.setEnabled(False)
-        self._export_worker = VideoExportWorker(
-            path,
-            self._clone_engine_for_export(),
-            self._fps_spin.value(),
-            w,
-            h,
-            png,
-            self,
-        )
-        self._export_worker.progress.connect(
-            lambda c, t: (self._progress.setMaximum(t), self._progress.setValue(c))
-        )
-        self._export_worker.completed.connect(self._on_export_done)
-        self._export_worker.failed.connect(self._on_export_failed)
-        self._export_worker.finished.connect(self._on_export_finished)
-        self._export_worker.start()
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._pause_canvas_for_export()
 
-    def _on_export_done(self, path: str) -> None:
-        QMessageBox.information(self, "書き出し完了", f"保存しました:\n{path}")
+        label = "PNG 連番を書き出し中…" if png else "動画を書き出し中…"
+        dlg = QProgressDialog(label, "キャンセル", 0, 100, self)
+        dlg.setWindowTitle("書き出し")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
 
-    def _on_export_failed(self, tb: str) -> None:
-        QMessageBox.critical(self, "書き出しエラー", tb[:2000])
+        def on_progress(cur: int, total: int) -> None:
+            if dlg.wasCanceled():
+                raise InterruptedError("書き出しがキャンセルされました。")
+            dlg.setMaximum(max(1, total))
+            dlg.setValue(cur)
+            self._progress.setMaximum(max(1, total))
+            self._progress.setValue(cur)
+            QApplication.processEvents()
 
-    def _on_export_finished(self) -> None:
-        self._export_worker = None
-        self._progress.setVisible(False)
-        on = bool(self._events)
-        self._btn_export.setEnabled(on)
-        self._btn_png.setEnabled(on)
+        try:
+            if png:
+                out = export_png_sequence(
+                    eng,
+                    path,
+                    fps=fps,
+                    width=w,
+                    height=h,
+                    transparent=True,
+                    progress=on_progress,
+                )
+            else:
+                out = export_video(
+                    eng,
+                    path,
+                    fps=fps,
+                    width=w,
+                    height=h,
+                    progress=on_progress,
+                )
+            QMessageBox.information(self, "書き出し完了", f"保存しました:\n{out}")
+        except InterruptedError:
+            pass
+        except Exception as exc:
+            import traceback
+
+            QMessageBox.critical(self, "書き出しエラー", traceback.format_exc()[:2000])
+        finally:
+            dlg.close()
+            self._progress.setVisible(False)
+            self._resume_canvas_after_export()
+            on = bool(self._events)
+            self._btn_export.setEnabled(on)
+            self._btn_png.setEnabled(on)
 
     def stop_export(self) -> None:
-        if self._export_worker and self._export_worker.isRunning():
-            self._export_worker.requestInterruption()
-            self._export_worker.wait(8000)
         self._stop_midi_in()

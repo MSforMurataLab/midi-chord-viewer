@@ -107,17 +107,19 @@ impl PyVisualizerEngine {
         Ok(())
     }
 
-    #[pyo3(signature = (path, fps=30, width=1280, height=720))]
+    #[pyo3(signature = (path, fps=30, width=1280, height=720, ffmpeg_exe=None))]
     fn export_video_ffmpeg(
         &mut self,
         path: &str,
         fps: u32,
         width: u32,
         height: u32,
+        ffmpeg_exe: Option<&str>,
     ) -> PyResult<u32> {
+        let exe = ffmpeg_exe.unwrap_or("ffmpeg");
         let n = self
             .engine_mut()?
-            .export_video_ffmpeg(path, fps, width, height)
+            .export_video_ffmpeg(path, fps, width, height, exe)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
         Ok(n)
     }

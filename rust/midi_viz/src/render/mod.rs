@@ -8,6 +8,7 @@ pub mod spectrum_anim;
 pub use particles::ParticlePool;
 pub use renderer::{WgpuRenderer, SPECTRUM_FLOATS};
 pub use scene::{
-    pack_frame, GpuNoteInstance, NoteSceneUniform, SceneParams, VisualStyle,
+    build_scene_uniform, compose_gpu_scene, GpuNoteInstance, NoteSceneUniform, SceneParams,
+    VisualStyle,
 };
 pub use spectrum_anim::SpectrumAnimator;

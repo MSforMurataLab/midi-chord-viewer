@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""GPU オフライン書き出し — Rust/wgpu のみ。"""
+"""GPU オフライン書き出し — Rust/wgpu + 同梱 FFmpeg（メインスレッド描画推奨）。"""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -9,10 +10,20 @@ import numpy as np
 from PyQt6.QtGui import QImage
 
 from midi_lab.visualizer.engine import VisualizerEngine
+from midi_lab.visualizer.ffmpeg_util import resolve_ffmpeg_exe
 from midi_lab.visualizer.rust_bridge import VisualizerEngine as RustEngine, rust_available
 from midi_lab.visualizer.timeline import ql_to_sec
 
 ProgressCallback = Callable[[int, int], None]
+
+
+def export_duration_ql(engine: VisualizerEngine) -> float:
+    """書き出し尺（拍）— 最終ノート + 表示窓の余白。"""
+    base = float(engine.timeline.duration_ql)
+    if engine.timeline.notes:
+        base = max(base, max(n.end_ql for n in engine.timeline.notes))
+    tail = engine.window_ql / max(0.25, engine.speed) * 0.35
+    return base + tail
 
 
 def _require_rust() -> None:
@@ -40,7 +51,37 @@ def _make_rust_engine(py_eng: VisualizerEngine, width: int, height: int) -> Rust
     rust.set_style(py_eng.style_id)
     rust.set_track_colors(py_eng.track_colors)
     rust.set_particle_amount(py_eng.particle_amount)
+    rust.set_transport(0.0, py_eng.bpm, py_eng.window_sec, py_eng.speed)
     return rust
+
+
+def _spawn_ffmpeg(ffmpeg_exe: str, path: Path, width: int, height: int, fps: int) -> subprocess.Popen:
+    return subprocess.Popen(
+        [
+            ffmpeg_exe,
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+            "-i",
+            "pipe:0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "18",
+            str(path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def export_video(
@@ -61,45 +102,31 @@ def export_video(
     if ext not in (".mp4", ".mov", ".avi"):
         raise ValueError(f"未対応: {ext}")
 
+    ffmpeg_exe = resolve_ffmpeg_exe()
+    dur_ql = export_duration_ql(engine)
+    dur_sec = ql_to_sec(dur_ql, engine.bpm)
+    n_frames = max(1, int(dur_sec * fps) + 1)
+
     rust = _make_rust_engine(engine, w, h)
+    proc = _spawn_ffmpeg(ffmpeg_exe, out, w, h, fps)
     try:
-        n = int(
-            rust.export_video_ffmpeg(str(out), fps, w, h)
-        )
-        if progress:
-            progress(n, n)
-        return out
-    except (RuntimeError, AttributeError):
-        pass
-
-    import imageio.v2 as imageio
-
-    try:
-        import imageio_ffmpeg  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeError(
-            "動画書き出しには ffmpeg または imageio-ffmpeg が必要です。"
-        ) from exc
-
-    dur = ql_to_sec(engine.timeline.duration_ql, engine.bpm)
-    n = max(1, int(dur * fps) + 1)
-    kw: dict = {"fps": fps, "format": "FFMPEG"}
-    kw.update(codec="libx264", quality=8, pixelformat="yuv420p")
-
-    writer = imageio.get_writer(str(out), **kw)
-    try:
-        for i in range(n):
-            t = min(dur, i / fps)
-            t_ql = t * engine.bpm / 60.0
+        for i in range(n_frames):
+            t_sec = min(dur_sec, i / fps)
+            t_ql = min(dur_ql, t_sec * engine.bpm / 60.0)
             rust.set_transport(t_ql, engine.bpm, engine.window_sec, engine.speed)
             rust.tick(1.0 / fps)
             rgba = rust.render_frame_rgba()
-            rgb = np.frombuffer(rgba, dtype=np.uint8).reshape((h, w, 4))[:, :, :3]
-            writer.append_data(np.flipud(rgb))
+            if proc.stdin is not None:
+                proc.stdin.write(rgba)
             if progress:
-                progress(i + 1, n)
+                progress(i + 1, n_frames)
     finally:
-        writer.close()
+        if proc.stdin is not None:
+            proc.stdin.close()
+        rc = proc.wait()
+        del rust
+        if rc != 0:
+            raise RuntimeError(f"FFmpeg が終了コード {rc} で失敗しました。\nFFmpeg: {ffmpeg_exe}")
     return out
 
 
@@ -118,7 +145,8 @@ def export_png_sequence(
     directory.mkdir(parents=True, exist_ok=True)
     fps = max(12, min(60, int(fps)))
     w, h = max(64, int(width)), max(64, int(height))
-    dur = ql_to_sec(engine.timeline.duration_ql, engine.bpm)
+    dur_ql = export_duration_ql(engine)
+    dur = ql_to_sec(dur_ql, engine.bpm)
     n = max(1, int(dur * fps) + 1)
 
     rust = _make_rust_engine(engine, w, h)
@@ -126,7 +154,7 @@ def export_png_sequence(
 
     for i in range(n):
         t = min(dur, i / fps)
-        t_ql = t * engine.bpm / 60.0
+        t_ql = min(dur_ql, t * engine.bpm / 60.0)
         rust.set_transport(t_ql, engine.bpm, engine.window_sec, engine.speed)
         rust.tick(1.0 / fps)
         rgba = rust.render_frame_rgba()
@@ -140,4 +168,5 @@ def export_png_sequence(
         img.save(str(directory / f"frame_{i:05d}.png"))
         if progress:
             progress(i + 1, n)
+    del rust
     return directory

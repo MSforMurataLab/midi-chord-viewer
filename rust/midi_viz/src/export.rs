@@ -42,8 +42,14 @@ pub struct FfmpegPipe {
 }
 
 impl FfmpegPipe {
-    pub fn start(path: &str, width: u32, height: u32, fps: u32) -> Result<Self, String> {
-        let mut child = Command::new("ffmpeg")
+    pub fn start(
+        ffmpeg_exe: &str,
+        path: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<Self, String> {
+        let mut child = Command::new(ffmpeg_exe)
             .args([
                 "-y",
                 "-f",
@@ -109,13 +115,20 @@ pub struct FfmpegWriterThread {
 }
 
 impl FfmpegWriterThread {
-    pub fn start(path: &str, width: u32, height: u32, fps: u32) -> Result<Self, String> {
+    pub fn start(
+        ffmpeg_exe: &str,
+        path: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let path = path.to_string();
+        let ffmpeg_exe = ffmpeg_exe.to_string();
         let handle = thread::Builder::new()
             .name("midi_viz_ffmpeg".into())
             .spawn(move || {
-                let mut pipe = FfmpegPipe::start(&path, width, height, fps)?;
+                let mut pipe = FfmpegPipe::start(&ffmpeg_exe, &path, width, height, fps)?;
                 while let Ok(frame) = rx.recv() {
                     pipe.write_frame(&frame)?;
                 }

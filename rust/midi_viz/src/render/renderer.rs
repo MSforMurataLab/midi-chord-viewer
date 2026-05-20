@@ -37,9 +37,12 @@ struct EmitUniform {
     aspect: f32,
     y_lo: f32,
     y_hi: f32,
+    x0: f32,
+    x1: f32,
+    t_ql: f32,
+    style: f32,
     frame_seed: f32,
     amount_scale: f32,
-    _pad: [f32; 4],
 }
 
 pub struct WgpuRenderer {
@@ -70,6 +73,7 @@ pub struct WgpuRenderer {
     emit_uniform: wgpu::Buffer,
     emit_bind: wgpu::BindGroup,
     emit_pipeline: wgpu::ComputePipeline,
+    instance_count: u32,
 }
 
 impl WgpuRenderer {
@@ -92,7 +96,7 @@ impl WgpuRenderer {
             label: Some("note_scene_uniform"),
             contents: bytemuck::bytes_of(&NoteSceneUniform {
                 aspect: width as f32 / height as f32,
-                t_rel: 0.0,
+                t_ql: 0.0,
                 window_ql: 8.0,
                 kb_ratio: 0.14,
                 x0: 0.0,
@@ -157,13 +161,14 @@ impl WgpuRenderer {
             ],
         });
 
+        // TriangleStrip: BL → BR → TL → TR
         let quad_vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("quad"),
             contents: bytemuck::cast_slice(&[
                 [-1.0f32, -1.0],
                 [1.0, -1.0],
-                [1.0, 1.0],
                 [-1.0, 1.0],
+                [1.0, 1.0],
             ]),
             usage: wgpu::BufferUsages::VERTEX,
         });
@@ -233,7 +238,10 @@ impl WgpuRenderer {
                 })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState::default(),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
@@ -354,9 +362,12 @@ impl WgpuRenderer {
                 aspect: width as f32 / height as f32,
                 y_lo: 21.0,
                 y_hi: 108.0,
+                x0: 0.0,
+                x1: 8.0,
+                t_ql: 0.0,
+                style: 0.0,
                 frame_seed: 0.0,
                 amount_scale: 1.0,
-                _pad: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -574,7 +585,20 @@ impl WgpuRenderer {
             emit_uniform,
             emit_bind,
             emit_pipeline,
+            instance_count: 0,
         })
+    }
+
+    /// 曲読み込み・スタイル変更時のみ呼ぶ（毎フレームでは呼ばない）
+    pub fn upload_instances(&mut self, instances: &[GpuNoteInstance]) {
+        self.instance_count = instances.len().min(65536) as u32;
+        if self.instance_count > 0 {
+            self.queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(instances),
+            );
+        }
     }
 
     fn create_target(
@@ -652,7 +676,6 @@ impl WgpuRenderer {
 
     pub fn render(
         &mut self,
-        instances: &[GpuNoteInstance],
         scene: &NoteSceneUniform,
         spectrum: &[f32; SPECTRUM_FLOATS],
         note_vel_curr: &[f32; 128],
@@ -685,19 +708,16 @@ impl WgpuRenderer {
                 aspect,
                 y_lo: scene.y_lo,
                 y_hi: scene.y_hi,
+                x0: scene.x0,
+                x1: scene.x1,
+                t_ql: scene.t_ql,
+                style: scene.style,
                 frame_seed,
                 amount_scale: emit_amount_scale,
-                _pad: [0.0; 4],
             }),
         );
 
-        if !instances.is_empty() {
-            self.queue.write_buffer(
-                &self.instance_buffer,
-                0,
-                bytemuck::cast_slice(instances),
-            );
-        }
+        self.queue.write_buffer(&self.spawn_atomic, 0, &0u32.to_le_bytes());
 
         let mut encoder = self
             .device
@@ -747,12 +767,12 @@ impl WgpuRenderer {
                 occlusion_query_set: None,
             });
 
-            if !instances.is_empty() {
+            if self.instance_count > 0 {
                 rpass.set_pipeline(&self.note_pipeline);
                 rpass.set_bind_group(0, &self.note_bind, &[]);
                 rpass.set_vertex_buffer(0, self.quad_vertex.slice(..));
                 rpass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-                rpass.draw(0..4, 0..instances.len() as u32);
+                rpass.draw(0..4, 0..self.instance_count);
             }
 
             rpass.set_pipeline(&self.particle_pipeline);

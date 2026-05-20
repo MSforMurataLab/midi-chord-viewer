@@ -4,7 +4,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, copy_metadata
 
 block_cipher = None
 
@@ -19,6 +19,7 @@ for _name in ("midi_viz.pyd", "midi_viz.dll"):
 datas_m21, binaries_m21, hidden_m21 = collect_all("music21")
 datas_mpl, binaries_mpl, hidden_mpl = collect_all("matplotlib")
 datas_io, binaries_io, hidden_io = collect_all("imageio_ffmpeg")
+datas_imageio_meta = copy_metadata("imageio")
 binaries_sd = collect_dynamic_libs("sounddevice")
 _app_assets = [("image.png", ".")]
 
@@ -26,7 +27,7 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=binaries_m21 + binaries_mpl + binaries_io + binaries_sd + _binaries_midi_viz,
-    datas=datas_m21 + datas_mpl + datas_io + _app_assets,
+    datas=datas_m21 + datas_mpl + datas_io + datas_imageio_meta + _app_assets,
     hiddenimports=hidden_m21
     + hidden_mpl
     + hidden_io
@@ -81,6 +82,7 @@ a = Analysis(
         "midi_lab.visualizer",
         "midi_lab.visualizer.engine",
         "midi_lab.visualizer.export",
+        "midi_lab.visualizer.ffmpeg_util",
         "midi_lab.visualizer.midi_input",
         "midi_lab.visualizer.styles",
         "midi_viz",
