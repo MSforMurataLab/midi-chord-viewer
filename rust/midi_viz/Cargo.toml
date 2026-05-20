@@ -1,0 +1,37 @@
+[package]
+name = "midi_viz"
+version = "0.1.0"
+edition = "2021"
+description = "MIDI Chord Lab — wgpu visualizer (PyO3 native extension)"
+license = "MIT"
+
+[lib]
+name = "midi_viz"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "midi_viz_standalone"
+path = "src/bin/standalone.rs"
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+wgpu = "23"
+pollster = "0.4"
+bytemuck = { version = "1.19", features = ["derive"] }
+midly = "0.5"
+midir = "0.10"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+winit = { version = "0.30", features = ["rwh_06"] }
+raw-window-handle = "0.6"
+
+[features]
+default = ["python"]
+python = ["dep:pyo3"]
+
+[profile.release]
+lto = true
+codegen-units = 1

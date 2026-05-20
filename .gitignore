@@ -15,3 +15,6 @@ app.ico
 Thumbs.db
 *.log
 .cursor/
+rust/**/target/
+build_log.txt
+=5.10.0

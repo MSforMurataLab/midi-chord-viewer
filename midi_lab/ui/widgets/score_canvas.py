@@ -48,20 +48,29 @@ class ScoreCanvas(QWidget):
         super().resizeEvent(event)
         self._sync_figure_size()
 
-    def show_placeholder(self) -> None:
+    def show_placeholder(
+        self,
+        *,
+        title: str = "ピアノロール",
+        body: str = "MIDI を読み込むと、音程と時間の関係がここに表示されます",
+        icon_text: str = "▤",
+    ) -> None:
+        self.show_custom_placeholder(title, body, icon_text)
+
+    def show_custom_placeholder(self, title: str, body: str, icon_text: str = "▤") -> None:
         self._clear_widgets()
         wrap = QFrame()
         wrap.setObjectName("PlotPlaceholder")
         v = QVBoxLayout(wrap)
         v.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.setSpacing(10)
-        icon = QLabel("▤")
+        icon = QLabel(icon_text)
         icon.setObjectName("PlotPlaceholderIcon")
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        t = QLabel("ピアノロール")
+        t = QLabel(title)
         t.setObjectName("PlotPlaceholderTitle")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        b = QLabel("MIDI を読み込むと、音程と時間の関係がここに表示されます")
+        b = QLabel(body)
         b.setObjectName("PlotPlaceholderBody")
         b.setAlignment(Qt.AlignmentFlag.AlignCenter)
         b.setWordWrap(True)
@@ -70,7 +79,7 @@ class ScoreCanvas(QWidget):
         v.addWidget(b)
         self._layout.addWidget(wrap)
 
-    def set_figure(self, figure) -> None:
+    def set_figure(self, figure, *, show_toolbar: bool = True) -> None:
         """matplotlib Figure を表示（カスタム・ピアノロール / パフォーマンス用）。"""
         self._clear_widgets()
         self._figure = figure
@@ -79,8 +88,9 @@ class ScoreCanvas(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
-        self._toolbar = NavigationToolbar(self._canvas, self)
-        self._toolbar.setObjectName("PlotToolBar")
-        self._layout.addWidget(self._toolbar)
+        if show_toolbar:
+            self._toolbar = NavigationToolbar(self._canvas, self)
+            self._toolbar.setObjectName("PlotToolBar")
+            self._layout.addWidget(self._toolbar)
         self._layout.addWidget(self._canvas, stretch=1)
         QTimer.singleShot(0, self._sync_figure_size)

@@ -220,8 +220,10 @@ class PlaybackThread(QThread):
     """highlight_row: タイムライン行番号（-1 でハイライト解除）。"""
 
     highlight_row = pyqtSignal(int)
+    position_changed = pyqtSignal(float)
     mode_changed = pyqtSignal(str)
     finished_playback = pyqtSignal()
+    midi_message = pyqtSignal(int, int, int)  # status, data1, data2
 
     def __init__(self, timeline: list[tuple[float, float, tuple[int, ...]]], tempo: int = 120, parent=None):
         super().__init__(parent)
@@ -231,6 +233,17 @@ class PlaybackThread(QThread):
 
     def _stopped(self) -> bool:
         return self.isInterruptionRequested()
+
+    def _run_position_emitter(self, t0: float, duration_sec: float) -> None:
+        """ビジュアライザ同期用 — 経過秒を約 20Hz で通知。"""
+        while not self._stopped():
+            elapsed = time.perf_counter() - t0
+            if elapsed >= duration_sec:
+                self.position_changed.emit(duration_sec)
+                break
+            self.position_changed.emit(elapsed)
+            time.sleep(0.05)
+        self.position_changed.emit(-1.0)
 
     def _run_highlights_synced(self, marks: list[tuple[int, float, float]], t0: float) -> None:
         for row, start, end in marks:
@@ -244,10 +257,21 @@ class PlaybackThread(QThread):
 
     def _run_software(self, buf, sr) -> str:
         t0 = time.perf_counter()
+        duration = self._marks[-1][2] if self._marks else 0.0
         hl = threading.Thread(
             target=self._run_highlights_synced, args=(self._marks, t0), daemon=True
         )
+        pos = threading.Thread(
+            target=self._run_position_emitter, args=(t0, duration), daemon=True
+        )
         hl.start()
+        pos.start()
+        viz = threading.Thread(
+            target=self._run_midi_visualizer_sync,
+            args=(t0, duration),
+            daemon=True,
+        )
+        viz.start()
 
         mode = "silent"
         if sd is not None:
@@ -267,17 +291,30 @@ class PlaybackThread(QThread):
             if _play_buffer_winsound_async(buf, sr, self._stopped):
                 mode = "wave"
 
-        hl.join(timeout=max(1.0, (self._marks[-1][2] if self._marks else 1.0) + 1.0))
+        hl.join(timeout=max(1.0, duration + 1.0))
+        pos.join(timeout=max(1.0, duration + 1.0))
+        viz.join(timeout=max(1.0, duration + 1.0))
         return mode
 
     def _run_midi(self, port) -> None:
         events = _midi_schedule(self.timeline, self.tempo)
         wall = 0.0
         t0 = time.perf_counter()
+        duration = self._marks[-1][2] if self._marks else 0.0
         hl = threading.Thread(
             target=self._run_highlights_synced, args=(self._marks, t0), daemon=True
         )
+        pos = threading.Thread(
+            target=self._run_position_emitter, args=(t0, duration), daemon=True
+        )
         hl.start()
+        pos.start()
+        viz = threading.Thread(
+            target=self._run_midi_visualizer_sync,
+            args=(t0, duration),
+            daemon=True,
+        )
+        viz.start()
 
         for t_ev, kind, pitch in events:
             if self._stopped():
@@ -288,10 +325,44 @@ class PlaybackThread(QThread):
             wall = t_ev
             if kind == "on":
                 port.send(mido.Message("note_on", note=pitch, velocity=96))
+                self.midi_message.emit(0x90, pitch, 96)
             else:
                 port.send(mido.Message("note_off", note=pitch, velocity=0))
+                self.midi_message.emit(0x80, pitch, 0)
 
-        hl.join(timeout=max(1.0, (self._marks[-1][2] if self._marks else 1.0) + 1.0))
+        hl.join(timeout=max(1.0, duration + 1.0))
+        pos.join(timeout=max(1.0, duration + 1.0))
+        viz.join(timeout=max(1.0, duration + 1.0))
+
+    def _run_midi_visualizer_sync(self, t0: float, duration: float) -> None:
+        """ビジュアライザ用 — スケジュールどおり note on/off を通知。"""
+        events = _midi_schedule(self.timeline, self.tempo)
+        for t_ev, kind, pitch in events:
+            if self._stopped():
+                break
+            if not _sleep_until(t0 + t_ev, self._stopped):
+                break
+            if kind == "on":
+                self.midi_message.emit(0x90, pitch, 96)
+            else:
+                self.midi_message.emit(0x80, pitch, 0)
+
+    def _run_timeline_only(self) -> None:
+        """音声バッファなし — ハイライトとビジュアライザ位置のみ同期。"""
+        if not self._marks:
+            return
+        t0 = time.perf_counter()
+        duration = self._marks[-1][2]
+        hl = threading.Thread(
+            target=self._run_highlights_synced, args=(self._marks, t0), daemon=True
+        )
+        pos = threading.Thread(
+            target=self._run_position_emitter, args=(t0, duration), daemon=True
+        )
+        hl.start()
+        pos.start()
+        hl.join(timeout=max(1.0, duration + 1.0))
+        pos.join(timeout=max(1.0, duration + 1.0))
 
     def run(self) -> None:
         self._marks = build_playback_marks(self.timeline, self.tempo)
@@ -304,6 +375,7 @@ class PlaybackThread(QThread):
                 buf, sr, _ = render_timeline_buffer(self.timeline, self.tempo)
                 if buf is None:
                     self.mode_changed.emit("silent")
+                    self._run_timeline_only()
                 else:
                     mode = self._run_software(buf, sr)
                     self.mode_changed.emit(mode if mode != "silent" else "silent")

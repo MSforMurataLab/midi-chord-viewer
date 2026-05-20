@@ -1,22 +1,35 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec: dist/MIDIChordViewer/MIDIChordViewer.exe"""
 
+import sys
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 
 block_cipher = None
 
+_binaries_midi_viz = []
+_sp = Path(sys.prefix) / "Lib" / "site-packages"
+for _name in ("midi_viz.pyd", "midi_viz.dll"):
+    _p = _sp / _name
+    if _p.is_file():
+        _binaries_midi_viz.append((str(_p), "."))
+        break
+
 datas_m21, binaries_m21, hidden_m21 = collect_all("music21")
 datas_mpl, binaries_mpl, hidden_mpl = collect_all("matplotlib")
+datas_io, binaries_io, hidden_io = collect_all("imageio_ffmpeg")
 binaries_sd = collect_dynamic_libs("sounddevice")
 _app_assets = [("image.png", ".")]
 
 a = Analysis(
     ["app.py"],
     pathex=[],
-    binaries=binaries_m21 + binaries_mpl + binaries_sd,
-    datas=datas_m21 + datas_mpl + _app_assets,
+    binaries=binaries_m21 + binaries_mpl + binaries_io + binaries_sd + _binaries_midi_viz,
+    datas=datas_m21 + datas_mpl + datas_io + _app_assets,
     hiddenimports=hidden_m21
     + hidden_mpl
+    + hidden_io
     + [
         "matplotlib.backends.backend_qtagg",
         "matplotlib.backends.backend_qt",
@@ -64,6 +77,20 @@ a = Analysis(
         "midi_lab.core.launch_args",
         "midi_lab.core.file_association",
         "midi_lab.ui.widgets.voice_leading_panel",
+        "midi_lab.ui.widgets.visualizer_panel",
+        "midi_lab.visualizer",
+        "midi_lab.visualizer.engine",
+        "midi_lab.visualizer.export",
+        "midi_lab.visualizer.midi_input",
+        "midi_lab.visualizer.styles",
+        "midi_viz",
+        "midi_lab.visualizer.canvas_factory",
+        "midi_lab.visualizer.widget_rust",
+        "midi_lab.visualizer.rust_bridge",
+        "midi_lab.core.visualizer_export_worker",
+        "imageio",
+        "imageio_ffmpeg",
+        "imageio.plugins.ffmpeg",
         "sounddevice",
         "numpy",
         "midi_lab.diagnostics",

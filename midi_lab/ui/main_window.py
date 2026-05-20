@@ -78,8 +78,10 @@ from midi_lab.ui.widgets import (
     SidebarPanel,
     TimelinePanel,
     VoiceLeadingPanel,
+    VisualizerPanel,
     WelcomePage,
 )
+from midi_lab.ui.widgets.visualizer_panel import VIDEO_FILTER
 from midi_lab.ui.widgets.timeline_panel import (
     COL_BEAT,
     COL_DURATION,
@@ -143,6 +145,10 @@ class MainWindow(QMainWindow):
         self._export_report_act.setShortcut("Ctrl+Shift+R")
         self._export_report_act.setEnabled(False)
         self._export_report_act.triggered.connect(self.export_analysis_report)
+        self._export_video_act = QAction("ビジュアライザ動画を書き出し…", self)
+        self._export_video_act.setShortcut("Ctrl+Shift+V")
+        self._export_video_act.setEnabled(False)
+        self._export_video_act.triggered.connect(self.export_visualizer_video)
         self._save_act = QAction("MIDI を保存", self)
         self._save_act.setShortcut(QKeySequence.StandardKey.Save)
         self._save_act.setEnabled(False)
@@ -196,6 +202,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._export_xml_act)
         file_menu.addAction(self._export_midi_act)
         file_menu.addAction(self._export_report_act)
+        file_menu.addAction(self._export_video_act)
         file_menu.addAction(self._save_act)
         file_menu.addSeparator()
 
@@ -385,9 +392,12 @@ class MainWindow(QMainWindow):
         self._pianoroll_canvas = ScoreCanvas()
         self._perf_canvas = ScoreCanvas()
         self._voice_panel = VoiceLeadingPanel()
+        self._visualizer_panel = VisualizerPanel()
         self._workspace_tabs.addTab(self._pianoroll_canvas, "ピアノロール")
         self._workspace_tabs.addTab(self._perf_canvas, "パフォーマンス")
         self._workspace_tabs.addTab(self._voice_panel, "声部進行")
+        self._workspace_tabs.addTab(self._visualizer_panel, "MIDIビジュアライザ")
+        self._workspace_tabs.currentChanged.connect(self._on_workspace_tab_changed)
         lay.addWidget(self._workspace_tabs)
         return wrap
 
@@ -593,6 +603,8 @@ class MainWindow(QMainWindow):
                     return
         self.stop_transport()
         self._stop_analysis_build()
+        if hasattr(self, "_visualizer_panel"):
+            self._visualizer_panel.stop_export()
         if self._load_worker is not None and self._load_worker.isRunning():
             self._load_worker.requestInterruption()
             self._load_worker.wait(3000)
@@ -836,6 +848,7 @@ class MainWindow(QMainWindow):
         self._export_xml_act.setEnabled(on)
         self._export_midi_act.setEnabled(on)
         self._export_report_act.setEnabled(on)
+        self._export_video_act.setEnabled(on)
         self._save_act.setEnabled(on and self._dirty)
         self._btn_export_xml.setEnabled(on)
         self._btn_export_midi.setEnabled(on)
@@ -893,6 +906,16 @@ class MainWindow(QMainWindow):
             self._perf_canvas.show_placeholder()
         if hasattr(self, "_voice_panel"):
             self._voice_panel.clear_data()
+        if hasattr(self, "_visualizer_panel"):
+            self._visualizer_panel.clear_data()
+
+    def _refresh_visualizer(self) -> None:
+        if not hasattr(self, "_visualizer_panel"):
+            return
+        if self._note_events:
+            self._visualizer_panel.set_score_data(self._note_events, float(self._tempo.value()))
+        else:
+            self._visualizer_panel.clear_data()
 
     def _stop_analysis_build(self) -> None:
         if self._analysis_worker is not None and self._analysis_worker.isRunning():
@@ -946,6 +969,30 @@ class MainWindow(QMainWindow):
             self._perf_canvas.show_placeholder()
         self._voice_panel.populate(list(result.voice_rows))
         self._voice_panel.set_summary(result.voice_summary)
+        self._refresh_visualizer()
+
+    def export_visualizer_video(self) -> None:
+        if not self._note_events:
+            return
+        self._refresh_visualizer()
+        default = "visualization.mp4"
+        if self._current_path is not None:
+            default = self._current_path.stem + "_viz.mp4"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "ビジュアライザ動画を保存",
+            default,
+            VIDEO_FILTER,
+        )
+        if not path:
+            return
+        from pathlib import Path as _Path
+
+        p = _Path(path)
+        if p.suffix.lower() not in (".mp4", ".mov", ".avi"):
+            path = str(p.with_suffix(".mp4"))
+        self._workspace_tabs.setCurrentWidget(self._visualizer_panel)
+        self._visualizer_panel.start_export(path)
 
     def export_analysis_report(self) -> None:
         if self._work_flat is None or self._current_path is None:
@@ -1238,6 +1285,8 @@ class MainWindow(QMainWindow):
             return
         self._playback = PlaybackThread(tl, self._tempo.value(), self)
         self._playback.highlight_row.connect(self._on_playback_highlight_row)
+        self._playback.position_changed.connect(self._on_playback_position)
+        self._playback.midi_message.connect(self._on_playback_midi_message)
         self._playback.mode_changed.connect(self._on_playback_mode)
         self._playback.finished_playback.connect(self._on_playback_done)
         self._btn_play.setEnabled(False)
@@ -1265,6 +1314,20 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+    def _on_workspace_tab_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        if self._workspace_tabs.widget(index) is self._visualizer_panel:
+            self._visualizer_panel.on_tab_activated()
+
+    def _on_playback_position(self, t_sec: float) -> None:
+        if hasattr(self, "_visualizer_panel"):
+            self._visualizer_panel.update_playback_time(t_sec)
+
+    def _on_playback_midi_message(self, status: int, data1: int, data2: int) -> None:
+        if hasattr(self, "_visualizer_panel"):
+            self._visualizer_panel.forward_playback_midi(status, data1, data2)
+
     def _on_playback_mode(self, mode: str) -> None:
         msgs = {
             "midi": "再生中 — MIDI デバイス",
@@ -1277,6 +1340,8 @@ class MainWindow(QMainWindow):
 
     def _on_playback_done(self) -> None:
         self._playback_highlighting = False
+        if hasattr(self, "_visualizer_panel"):
+            self._visualizer_panel.on_playback_stopped()
         self.piano.clear_active()
         self._btn_play.setEnabled(self._work_flat is not None)
         self._btn_stop.setEnabled(self._work_flat is not None)
@@ -1291,6 +1356,8 @@ class MainWindow(QMainWindow):
             self._playback.wait(3000)
         self._playback = None
         self._playback_highlighting = False
+        if hasattr(self, "_visualizer_panel"):
+            self._visualizer_panel.on_playback_stopped()
         self.piano.clear_active()
         self._btn_play.setEnabled(self._work_flat is not None)
         self._btn_stop.setEnabled(self._work_flat is not None)
@@ -1349,6 +1416,7 @@ class MainWindow(QMainWindow):
             self._update_window_title()
             self._status_mode.setText("編集中")
             self.statusBar().showMessage(f"{name} を読み込みました", 12000)
+            self._refresh_visualizer()
             self._start_analysis_build()
         except Exception:
             self._stop_analysis_build()

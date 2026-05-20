@@ -79,6 +79,10 @@ def run() -> int:
     _install_excepthook()
     log(f"--- run start pending_midi={pending_midi!r} ---")
 
+    from midi_lab.visualizer.gl_format import configure_opengl_surface
+
+    configure_opengl_surface()
+
     app = QApplication(sys.argv)
     apply_app_font(app)
     app.setApplicationName("MIDI Chord Lab")

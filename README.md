@@ -2,7 +2,7 @@
 
 MIDI の和声（コード）を解析・編集する Windows 向けデスクトップアプリです。PyQt6 と music21 をベースに、**和声タイムライン**・**分析スタジオ**・**ルールベース理論アシスト**・**仮想鍵盤**・**再生**を一体化しています。
 
-**現在のバージョン:** 2.7.0
+**現在のバージョン:** 2.10.0
 
 ## 主な機能
 
@@ -13,6 +13,7 @@ MIDI の和声（コード）を解析・編集する Windows 向けデスクト
 | 行操作 | 右クリックで行の追加・複製・削除 |
 | Undo / Redo | タイムライン編集の取り消し（`Ctrl+Z` / `Ctrl+Y`） |
 | 分析スタジオ | ピアノロール・パフォーマンス統計・声部進行（非同期描画） |
+| MIDI ビジュアライザ | ModernGL (GPU)・ブルーム・16k パーティクル・4 スタイル・Transport 同期 |
 | コード記号推定 | 構成音から `Cmaj7` / `Am7` などを自動表示 |
 | 理論アシスト | メジャー／マイナーキー向けルールベース置換候補 |
 | 再生 | MIDI デバイスまたはソフトウェア音源。ファイルの BPM を反映 |
@@ -49,7 +50,7 @@ build.bat
 2. [Inno Setup 6](https://jrsoftware.org/isdl.php) をインストール
 3. `build_installer.bat` を実行
 
-**成果物:** `dist/installer/MIDIChordLab_Setup_2.7.0.exe`
+**成果物:** `dist/installer/MIDIChordLab_Setup_2.8.0.exe`
 
 インストーラーではデスクトップショートカットと `.mid` / `.midi` の関連付け（任意）を設定できます。
 
@@ -83,6 +84,7 @@ build.bat
 | MusicXML | `Ctrl+Shift+S` |
 | MIDI 書き出し | `Ctrl+Shift+M` |
 | 分析レポート | `Ctrl+Shift+R` |
+| ビジュアライザ動画 | `Ctrl+Shift+V` |
 
 ## 理論アシスト
 
