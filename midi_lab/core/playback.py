@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import time
 import wave
 from pathlib import Path
@@ -11,16 +10,19 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from midi_lab.core.constants import clamp_bpm
 from midi_lab.core.playback_notes import (
     midi_events_from_schedule,
     schedule_duration_sec,
 )
+from midi_lab.core.midi_controls import ChannelControlChange
 from midi_lab.core.playback_schedule import build_playback_schedule
 from midi_lab.core.soundfont_player import (
     PlaybackSetupError,
     is_render_cached,
     render_soundfont_buffer,
 )
+from midi_lab.core.temp_files import temp_file_path
 
 if TYPE_CHECKING:
     from midi_lab.core.note_events import NoteEvent
@@ -55,7 +57,8 @@ def stop_audio_output() -> None:
 
 
 def _tempo_spq(tempo: int) -> float:
-    return 60.0 / float(max(40, min(220, tempo)))
+    # レビュー: settings / midi_tempo と同じ clamp_bpm を使用
+    return 60.0 / float(clamp_bpm(tempo))
 
 
 def build_playback_marks(
@@ -87,28 +90,20 @@ def _play_buffer_winsound_async(buf, sample_rate: int, stop_check) -> bool:
         import winsound
 
         pcm = (buf * 32767.0).astype(np.int16)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            path = Path(tmp.name)
-        with wave.open(str(path), "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate)
-            wf.writeframes(pcm.tobytes())
-        winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
-        deadline = time.perf_counter() + len(buf) / sample_rate + 0.05
-        while time.perf_counter() < deadline:
-            if stop_check():
-                winsound.PlaySound(None, winsound.SND_PURGE)
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                return True
-            time.sleep(_TICK_SLEEP)
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # レビュー: 一時 WAV を context で確実に削除（再生中は winsound がファイルを掴む）
+        with temp_file_path(suffix=".wav", prefix="midi_lab_pb_") as path:
+            with wave.open(str(path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(pcm.tobytes())
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            deadline = time.perf_counter() + len(buf) / sample_rate + 0.05
+            while time.perf_counter() < deadline:
+                if stop_check():
+                    winsound.PlaySound(None, winsound.SND_PURGE)
+                    return True
+                time.sleep(_TICK_SLEEP)
         return True
     except Exception:
         return False
@@ -128,22 +123,31 @@ class PlaybackThread(QThread):
         harmony_timeline: list[tuple[float, float, tuple[int, ...]]],
         tempo: int = 120,
         note_events: list[NoteEvent] | None = None,
+        channel_controls: list[ChannelControlChange] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.harmony_timeline = harmony_timeline
         self.note_events = list(note_events) if note_events else []
+        self.channel_controls = list(channel_controls or [])
         self.tempo = tempo
         self._marks: list[tuple[int, float, float]] = []
         self._note_schedule: list = []
         self._channel_programs: dict[int, int] = {}
         self._render_proc = None
 
-        self._note_schedule, self._channel_programs = build_playback_schedule(
-            self.note_events,
-            self.harmony_timeline,
-            tempo,
+        self._note_schedule, self._channel_programs, self._channel_controls = (
+            build_playback_schedule(
+                self.note_events,
+                self.harmony_timeline,
+                tempo,
+                self.channel_controls,
+            )
         )
+
+    def channel_programs(self) -> dict[int, int]:
+        """UI 向け — レビュー: _channel_programs への直接参照を避ける。"""
+        return dict(self._channel_programs)
 
     def _stopped(self) -> bool:
         return self.isInterruptionRequested()
@@ -245,7 +249,11 @@ class PlaybackThread(QThread):
                 return
 
             need_render = not is_render_cached(
-                self._note_schedule, self._channel_programs, self.tempo, SAMPLE_RATE
+                self._note_schedule,
+                self._channel_programs,
+                self.tempo,
+                SAMPLE_RATE,
+                self._channel_controls,
             )
             if need_render:
                 self.preparing.emit(True)
@@ -256,6 +264,7 @@ class PlaybackThread(QThread):
                 SAMPLE_RATE,
                 stop_check=self._stopped,
                 render_proc_holder=lambda p: setattr(self, "_render_proc", p),
+                channel_controls=self._channel_controls,
             )
             if need_render:
                 self.preparing.emit(False)

@@ -11,7 +11,7 @@
 - `GeneralUser-GS/GeneralUser-GS.sf2`
 - `Animal_Crossing_Wild_World.sf2`
 
-`FluidR3_GM.sf2` など 100MB を超えるファイルは Git 管理外です。ローカルに置けばドロップダウンと配布ビルドに含まれます。
+`FluidR3_GM.sf2` や `chiptune_soundfont_4.0.sf2` など 100MB を超えるファイルは Git 管理外です。ローカルに置けばドロップダウンと配布ビルドに含まれます。
 
 選択は設定に保存され、次回起動時も復元されます。
 

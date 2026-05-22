@@ -10,6 +10,7 @@ from music21 import harmony
 from music21 import key as m21_key
 from music21 import note as m21_note
 from music21 import pitch as m21_pitch
+from music21 import roman as m21_roman
 from midi_lab.core.chord_rules import (
     chord_spec_from_element,
     key_from_music21,
@@ -376,9 +377,10 @@ def melody_midi_from_previous(labels: list[str], row_ql: list[float], r: int) ->
     return None
 
 
-def harmony_chord_for_melody_at_row(
+def nearest_harmony_chord_for_row(
     labels: list[str], row_ql: list[float], r: int, ky: m21_key.Key | None
 ) -> m21_chord.Chord | None:
+    """メロディ候補用 — 当該行または前の行を遡って最初のコードを返す（レビュー: 旧名は誤解を招く）。"""
     if r < 0 or r >= len(row_ql):
         return None
     try:
@@ -393,12 +395,16 @@ def harmony_chord_for_melody_at_row(
         pass
     if ky is not None:
         try:
-            rn = roman.RomanNumeral("I", ky)
+            rn = m21_roman.RomanNumeral("I", ky)
             if rn.chord:
                 return rn.chord
         except Exception:
             pass
     return None
+
+
+# 後方互換エイリアス
+harmony_chord_for_melody_at_row = nearest_harmony_chord_for_row
 
 
 def melodic_note_candidates(

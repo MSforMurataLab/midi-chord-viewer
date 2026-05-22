@@ -6,7 +6,7 @@
 #endif
 
 #define MyAppName "MIDI Chord Lab"
-#define MyAppVersion "2.14.6"
+#define MyAppVersion "2.14.9"
 #define MyAppPublisher "MSforMurataLab"
 #define MyAppURL "https://github.com/MSforMurataLab/midi-chord-viewer"
 #define MyAppExeName "MIDIChordViewer.exe"

@@ -50,6 +50,10 @@ class VisualizerPanel(QWidget):
         self._build_ui()
         self.clear_data()
 
+    def has_events(self) -> bool:
+        """レビュー: MainWindow から _events へ直接触れないようにする。"""
+        return bool(self._events)
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

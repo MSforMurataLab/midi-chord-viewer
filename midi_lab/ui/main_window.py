@@ -41,6 +41,7 @@ from midi_lab.core.edit_history import EditHistory, TimelineSnapshot
 from midi_lab.core.analysis_report import build_analysis_html
 from midi_lab.core.functional_harmony import functional_label
 from midi_lab.core.load_worker import LoadedScore, MidiLoadWorker
+from midi_lab.core.midi_controls import ChannelControlChange
 from midi_lab.core.note_events import NoteEvent
 from midi_lab.core.performance_analytics import (
     analyze_performance,
@@ -61,7 +62,7 @@ from midi_lab.core.harmony import (
     clear_chord_figure_cache,
     detect_key_for_score,
     event_display_label,
-    harmony_chord_for_melody_at_row,
+    nearest_harmony_chord_for_row,
     melodic_note_candidates,
     melody_midi_from_previous,
     parse_chord_cell,
@@ -70,10 +71,10 @@ from midi_lab.core.harmony import (
 )
 from midi_lab.core.playback import PlaybackThread, stop_audio_output
 from midi_lab.core.soundfont_player import (
-    _preferred_soundfont_choice,
     apply_soundfont_selection,
     enumerate_soundfont_choices,
     key_to_soundfont_path,
+    preferred_soundfont_choice,
     selected_soundfont,
 )
 from midi_lab.core.soundfont_preload import SoundfontPreloadWorker
@@ -108,7 +109,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 680)
         self.setAcceptDrops(True)
 
-        self._original_score = None
         self._work_flat: m21_stream.Stream | None = None
         self._current_path: Path | None = None
         self._detected_key: m21_key.Key | None = None
@@ -123,6 +123,7 @@ class MainWindow(QMainWindow):
         self._body_split: QSplitter | None = None
         self._sidebar_min_width = SidebarPanel.WIDTH
         self._note_events: list[NoteEvent] = []
+        self._channel_controls: list[ChannelControlChange] = []
         self._voice_steps = []
         self._dirty = False
         self._edit_history = EditHistory()
@@ -501,8 +502,9 @@ class MainWindow(QMainWindow):
                 saved and key_to_soundfont_path(saved) == ch.path
             ):
                 select_idx = i
+                break  # レビュー: 複数マッチ時は最初の一致を採用
         if choices and not saved:
-            preferred = _preferred_soundfont_choice(choices)
+            preferred = preferred_soundfont_choice(choices)
             select_idx = next(
                 (i for i, ch in enumerate(choices) if ch.key == preferred.key),
                 0,
@@ -553,6 +555,7 @@ class MainWindow(QMainWindow):
             self._note_events,
             tl,
             self._tempo.value(),
+            self._channel_controls,
             self,
         )
         self._preload_worker.completed.connect(self._on_soundfont_preload_done)
@@ -654,11 +657,13 @@ class MainWindow(QMainWindow):
         if cw is not None and hasattr(self, "_loading"):
             self._loading.setGeometry(cw.rect())
 
-    def showEvent(self, event):
+    def showEvent(self, event) -> None:
+        # レビュー: 二重定義を統合 — レイアウト・アシストパネル初期化と SoundFont 一覧更新
         super().showEvent(event)
         QTimer.singleShot(50, self._refresh_layout)
         if not assist_panel_visible_default():
             QTimer.singleShot(80, lambda: self._toggle_assist_panel(False))
+        self._refresh_soundfont_combo(block_signals=True)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_F11:
@@ -966,10 +971,6 @@ class MainWindow(QMainWindow):
         self._refresh_soundfont_combo(block_signals=True)
         self._update_undo_actions()
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._refresh_soundfont_combo(block_signals=True)
-
     def _roman_for_row_element(self, el) -> str:
         return functional_label(el, self._detected_key)
 
@@ -1258,9 +1259,32 @@ class MainWindow(QMainWindow):
             melody_midi=prev,
         ):
             self._chord_list.addItem(s)
-        harm = harmony_chord_for_melody_at_row(labels, self._row_ql, r, self._detected_key)
+        harm = nearest_harmony_chord_for_row(labels, self._row_ql, r, self._detected_key)
         for line in melodic_note_candidates(prev, harm, self._detected_key):
             self._melody_list.addItem(line)
+
+    @staticmethod
+    def _parse_positive_ql(text: str) -> float:
+        ql = float(text.replace(",", "."))
+        if ql <= 0:
+            raise ValueError("長さは正の数にしてください")
+        return ql
+
+    def _update_label_row_ui(
+        self,
+        row: int,
+        el: m21_chord.Chord | m21_note.Note,
+        mids: tuple[int, ...],
+    ) -> None:
+        """レビュー: parse_chord_cell の結果を一度だけ使い UI を更新。"""
+        pit = self.table.item(row, COL_PITCHES)
+        if pit is not None:
+            pit.setText(" ".join(m21_pitch.Pitch(m).nameWithOctave for m in mids))
+        rom = self.table.item(row, COL_ROMAN)
+        if rom is not None:
+            rom.setText(self._roman_for_row_element(el))
+        self.piano.set_active_pitches(set(mids))
+        self._refresh_suggestions(row)
 
     def _on_table_cell_changed(self, row: int, col: int) -> None:
         if self._suppress_table or self._work_flat is None:
@@ -1270,39 +1294,28 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, col)
         if item is None:
             return
+        text = item.text()
+        parsed_el: m21_chord.Chord | m21_note.Note | None = None
+        parsed_mids: tuple[int, ...] = ()
         if col == COL_DURATION:
             try:
-                ql = float(item.text().replace(",", "."))
-                if ql <= 0:
-                    raise ValueError("長さは正の数にしてください")
+                self._row_ql[row] = self._parse_positive_ql(text)
             except Exception as e:
-                QMessageBox.warning(self, "長さ", f"解釈できません:\n{item.text()}\n\n{e}")
+                QMessageBox.warning(self, "長さ", f"解釈できません:\n{text}\n\n{e}")
                 return
         else:
             try:
-                parse_chord_cell(item.text(), self._row_ql[row])
+                parsed_el, parsed_mids = parse_chord_cell(text, self._row_ql[row])
             except Exception as e:
-                QMessageBox.warning(self, "表記エラー", f"解釈できません:\n{item.text()}\n\n{e}")
+                QMessageBox.warning(self, "表記エラー", f"解釈できません:\n{text}\n\n{e}")
                 return
         if not self._hist_cell_pushed:
             self._push_history()
             self._hist_cell_pushed = True
-        if col == COL_DURATION:
-            ql = float(item.text().replace(",", "."))
-            self._row_ql[row] = ql
         try:
             self._work_flat = rebuild_stream_from_table(self._work_flat, self._row_tuples(), self._row_ql)
-            if col == COL_LABEL:
-                _, mids = parse_chord_cell(item.text(), self._row_ql[row])
-                pit = self.table.item(row, COL_PITCHES)
-                if pit is not None:
-                    pit.setText(" ".join(m21_pitch.Pitch(m).nameWithOctave for m in mids))
-                el_new, _ = parse_chord_cell(item.text(), self._row_ql[row])
-                rom = self.table.item(row, COL_ROMAN)
-                if rom is not None:
-                    rom.setText(self._roman_for_row_element(el_new))
-                self.piano.set_active_pitches(set(mids))
-                self._refresh_suggestions(row)
+            if col == COL_LABEL and parsed_el is not None:
+                self._update_label_row_ui(row, parsed_el, parsed_mids)
             self._update_timeline_stats()
             self._mark_dirty()
             self._schedule_analysis_refresh()
@@ -1406,6 +1419,7 @@ class MainWindow(QMainWindow):
             tl,
             self._tempo.value(),
             note_events=self._note_events if self._note_events else None,
+            channel_controls=self._channel_controls,
             parent=self,
         )
         self._playback.highlight_row.connect(self._on_playback_highlight_row)
@@ -1419,7 +1433,7 @@ class MainWindow(QMainWindow):
         self._playback.finished_playback.connect(self._on_playback_done)
         self._btn_play.setEnabled(False)
         self._btn_stop.setEnabled(True)
-        if hasattr(self, "_visualizer_panel") and self._visualizer_panel._events:
+        if hasattr(self, "_visualizer_panel") and self._visualizer_panel.has_events():
             self._visualizer_panel.set_playback_active(True)
         self._playback.start()
 
@@ -1482,14 +1496,16 @@ class MainWindow(QMainWindow):
 
     def _on_playback_mode(self, mode: str) -> None:
         ch_info = ""
-        if self._note_events and self._playback and self._playback._channel_programs:
+        if self._note_events and self._playback:
             from midi_lab.core.instruments import program_display_name
 
-            parts = [
-                f"Ch{ch}:{program_display_name(prog)}"
-                for ch, prog in sorted(self._playback._channel_programs.items())
-            ]
-            ch_info = " [" + ", ".join(parts[:6]) + ("…" if len(parts) > 6 else "") + "]"
+            ch_progs = self._playback.channel_programs()
+            if ch_progs:
+                parts = [
+                    f"Ch{ch}:{program_display_name(prog)}"
+                    for ch, prog in sorted(ch_progs.items())
+                ]
+                ch_info = " [" + ", ".join(parts[:6]) + ("…" if len(parts) > 6 else "") + "]"
         sf_name = self._soundfont_combo.currentText() if hasattr(self, "_soundfont_combo") else ""
         sf_part = f" ({sf_name})" if sf_name else ""
         msgs = {
@@ -1554,12 +1570,12 @@ class MainWindow(QMainWindow):
     def _apply_loaded_score(self, payload: LoadedScore) -> None:
         try:
             clear_chord_figure_cache()
-            self._original_score = payload.score
             self._work_flat = payload.work_flat
             self._current_path = Path(payload.path)
             self._detected_key = payload.key_obj
             self._key_display.setText(payload.key_text)
             self._note_events = list(payload.note_events)
+            self._channel_controls = list(payload.channel_controls)
             self._edit_history.clear()
             self._dirty = False
             self._tempo.blockSignals(True)
@@ -1595,11 +1611,11 @@ class MainWindow(QMainWindow):
         self._stop_analysis_build()
         self._edit_history.clear()
         self._dirty = False
-        self._original_score = None
         self._work_flat = None
         self._current_path = None
         self._detected_key = None
         self._note_events = []
+        self._channel_controls = []
         self._key_display.setText("—")
         self._enable_score_controls(False)
         self._clear_analysis_views()

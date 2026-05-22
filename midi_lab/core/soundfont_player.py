@@ -19,7 +19,9 @@ from midi_lab.core.playback_notes import (
     build_note_schedule,
     schedule_duration_sec,
 )
+from midi_lab.core.constants import clamp_bpm
 from midi_lab.core.settings import selected_soundfont, set_selected_soundfont
+from midi_lab.core.midi_controls import ChannelControlChange
 from midi_lab.core.soundfont_midi import write_schedule_midi_temp
 
 log = logging.getLogger(__name__)
@@ -190,6 +192,11 @@ def _preferred_soundfont_choice(choices: list[SoundFontChoice]) -> SoundFontChoi
     return choices[0]
 
 
+def preferred_soundfont_choice(choices: list[SoundFontChoice]) -> SoundFontChoice:
+    """UI 向け公開 API（レビュー: _preferred_soundfont_choice への直接 import を避ける）。"""
+    return _preferred_soundfont_choice(choices)
+
+
 def discover_bundled_soundfonts() -> list[Path]:
     return [c.path for c in enumerate_soundfont_choices()]
 
@@ -351,10 +358,14 @@ def is_render_cached(
     channel_programs: dict[int, int],
     tempo: int,
     sample_rate: int = SAMPLE_RATE,
+    channel_controls: list[ChannelControlChange] | None = None,
 ) -> bool:
     if not schedule:
         return False
-    return _schedule_cache_key(schedule, channel_programs, tempo, sample_rate) in _RENDER_CACHE
+    key = _schedule_cache_key(
+        schedule, channel_programs, tempo, sample_rate, channel_controls
+    )
+    return key in _RENDER_CACHE
 
 
 def _schedule_cache_key(
@@ -362,13 +373,18 @@ def _schedule_cache_key(
     channel_programs: dict[int, int],
     tempo: int,
     sample_rate: int,
+    channel_controls: list[ChannelControlChange] | None = None,
 ) -> tuple:
     notes = tuple(
         (round(n.time_on, 4), round(n.time_off, 4), n.midi, n.velocity, n.channel, n.program)
         for n in schedule[:5000]
     )
     progs = tuple(sorted(channel_programs.items()))
-    return (notes, progs, tempo, sample_rate, str(resolve_soundfont_path()))
+    ccs = tuple(
+        (round(c.offset_ql, 4), c.channel, c.control, c.value)
+        for c in (channel_controls or [])[:2000]
+    )
+    return (notes, progs, ccs, tempo, sample_rate, str(resolve_soundfont_path()))
 
 
 def render_soundfont_buffer(
@@ -378,6 +394,7 @@ def render_soundfont_buffer(
     sample_rate: int = SAMPLE_RATE,
     stop_check=None,
     render_proc_holder=None,
+    channel_controls: list[ChannelControlChange] | None = None,
 ):
     """スケジュールを SoundFont でレンダリング（モノラル float32）。"""
     ensure_playback_ready()
@@ -387,7 +404,9 @@ def render_soundfont_buffer(
     if stop_check and stop_check():
         return None, sample_rate
 
-    cache_key = _schedule_cache_key(schedule, channel_programs, tempo, sample_rate)
+    cache_key = _schedule_cache_key(
+        schedule, channel_programs, tempo, sample_rate, channel_controls
+    )
     cached = _RENDER_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -399,7 +418,12 @@ def render_soundfont_buffer(
     midi_tmp: Path | None = None
     wav_tmp: Path | None = None
     try:
-        midi_tmp = write_schedule_midi_temp(schedule, channel_programs, tempo)
+        midi_tmp = write_schedule_midi_temp(
+            schedule,
+            channel_programs,
+            tempo,
+            channel_controls=channel_controls,
+        )
         fd, wav_name = tempfile.mkstemp(suffix=".wav", prefix="midi_lab_sf_")
         os.close(fd)
         wav_tmp = Path(wav_name)
@@ -459,7 +483,7 @@ def harmony_timeline_to_schedule(
     """和声タイムライン（コード行）を SoundFont 用スケジュールへ。"""
     from midi_lab.core.instruments import GM_PIANO
 
-    spq = 60.0 / float(max(40, min(220, tempo)))
+    spq = 60.0 / float(clamp_bpm(tempo))
     out: list[ScheduledNote] = []
     for off, ql, pitches in timeline:
         if not pitches:

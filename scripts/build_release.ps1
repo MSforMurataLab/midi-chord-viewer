@@ -78,7 +78,7 @@ if ($iscc) {
     New-Item -ItemType Directory -Force -Path dist\installer | Out-Null
     & $iscc "installer\midi_chord_lab.iss"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Host "Installer: dist\installer\MIDIChordLab_Setup_2.14.6.exe"
+    Write-Host "Installer: dist\installer\MIDIChordLab_Setup_2.14.9.exe"
 } else {
     Write-Warning "Inno Setup not found; skipped installer. dist\MIDIChordViewer\MIDIChordViewer.exe is ready."
 }

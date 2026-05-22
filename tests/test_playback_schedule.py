@@ -16,14 +16,15 @@ def test_build_playback_schedule_prefers_note_events():
         )
     ]
     tl = [(0.0, 1.0, (64, 67, 71))]
-    sched, ch = build_playback_schedule(events, tl, 120)
+    sched, ch, ccs = build_playback_schedule(events, tl, 120)
     assert len(sched) == 1
     assert sched[0].midi == 60
     assert ch.get(0) == 0
+    assert ccs == []
 
 
 def test_build_playback_schedule_harmony_fallback():
     tl = [(0.0, 1.0, (60, 64, 67))]
-    sched, ch = build_playback_schedule([], tl, 120)
+    sched, ch, ccs = build_playback_schedule([], tl, 120)
     assert len(sched) == 3
     assert ch.get(0) is not None

@@ -6,13 +6,14 @@ from pathlib import Path
 
 from PyQt6.QtCore import QSettings
 
-_ORG = "MurataLab"
-_APP = "MIDIChordLab"
+from midi_lab.branding import APP_SETTINGS_NAME, APP_SETTINGS_ORG
+from midi_lab.core.constants import DEFAULT_BPM, clamp_bpm
+
 _MAX_RECENT = 8
 
 
 def _settings() -> QSettings:
-    return QSettings(_ORG, _APP)
+    return QSettings(APP_SETTINGS_ORG, APP_SETTINGS_NAME)
 
 
 def recent_files() -> list[str]:
@@ -44,14 +45,14 @@ def set_fullscreen_default(on: bool) -> None:
 
 def default_tempo() -> int:
     try:
-        v = int(_settings().value("default_tempo", 120))
-        return max(40, min(208, v))
+        v = int(_settings().value("default_tempo", DEFAULT_BPM))
+        return clamp_bpm(v)
     except (TypeError, ValueError):
-        return 120
+        return DEFAULT_BPM
 
 
 def set_default_tempo(bpm: int) -> None:
-    _settings().setValue("default_tempo", max(40, min(208, int(bpm))))
+    _settings().setValue("default_tempo", clamp_bpm(bpm))
 
 
 def assist_panel_visible_default() -> bool:

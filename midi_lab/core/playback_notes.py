@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from midi_lab.core.constants import clamp_bpm
 from midi_lab.core.instruments import is_percussion_channel, program_for_part
 from midi_lab.core.note_events import NoteEvent
 
@@ -24,7 +25,7 @@ class ScheduledNote:
 
 
 def _tempo_spq(tempo: int) -> float:
-    return 60.0 / float(max(40, min(220, tempo)))
+    return 60.0 / float(clamp_bpm(tempo))
 
 
 def build_channel_program_map(
