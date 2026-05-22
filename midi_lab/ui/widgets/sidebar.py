@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QLabel,
     QPushButton,
+    QComboBox,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -18,6 +19,7 @@ SIDEBAR_WIDTH = 292
 BTN_H = 54
 BTN_H_PRIMARY = 56
 SPIN_H = 52
+COMBO_H = 44
 SECTION_GAP = 14
 ITEM_GAP = 12
 
@@ -101,9 +103,21 @@ class SidebarPanel(QFrame):
         self.tempo.setEnabled(False)
         self.tempo.setFixedHeight(SPIN_H)
         self.tempo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sf_hint = QLabel("音源 (SoundFont)")
+        sf_hint.setObjectName("SidebarSfHint")
+        sf_hint.setFixedHeight(22)
+        self.soundfont_combo = QComboBox()
+        self.soundfont_combo.setObjectName("SidebarSoundFont")
+        self.soundfont_combo.setEnabled(True)
+        self.soundfont_combo.setFixedHeight(COMBO_H)
+        self.soundfont_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         v.addWidget(self.btn_play)
         v.addWidget(self.btn_stop)
         v.addWidget(self.tempo)
+        v.addWidget(sf_hint)
+        v.addWidget(self.soundfont_combo)
 
         v.addSpacing(SECTION_GAP)
         v.addWidget(self._divider())

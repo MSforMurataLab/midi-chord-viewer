@@ -69,6 +69,14 @@ from midi_lab.core.harmony import (
     voice_leading_label,
 )
 from midi_lab.core.playback import PlaybackThread, stop_audio_output
+from midi_lab.core.soundfont_player import (
+    _preferred_soundfont_choice,
+    apply_soundfont_selection,
+    enumerate_soundfont_choices,
+    key_to_soundfont_path,
+    selected_soundfont,
+)
+from midi_lab.core.soundfont_preload import SoundfontPreloadWorker
 from midi_lab.core.score import build_playback_timeline, collect_harmony_events, rebuild_stream_from_table
 from midi_lab import __version__
 from midi_lab.ui.widgets import (
@@ -122,11 +130,18 @@ class MainWindow(QMainWindow):
         self._analysis_debounce.setSingleShot(True)
         self._analysis_debounce.setInterval(400)
         self._analysis_debounce.timeout.connect(self._start_analysis_build)
+        self._preload_worker: SoundfontPreloadWorker | None = None
+        self._preload_debounce = QTimer(self)
+        self._preload_debounce.setSingleShot(True)
+        self._preload_debounce.setInterval(600)
+        self._preload_debounce.timeout.connect(self._start_soundfont_preload)
         self._hist_cell_pushed = False
 
         self._build_menus()
         self._build_ui()
         self._wire_signals()
+        self._refresh_soundfont_combo(block_signals=True)
+        self._soundfont_combo.setEnabled(True)
         self.statusBar().showMessage("MIDI ファイルを開くか、ウィンドウへドロップしてください")
 
     def _build_menus(self) -> None:
@@ -374,6 +389,7 @@ class MainWindow(QMainWindow):
         self._btn_play = panel.btn_play
         self._btn_stop = panel.btn_stop
         self._tempo = panel.tempo
+        self._soundfont_combo = panel.soundfont_combo
         self._key_display = panel.key_display
         return panel
 
@@ -469,6 +485,91 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
         self._chord_list.itemDoubleClicked.connect(self._on_chord_suggestion)
         self._melody_list.itemDoubleClicked.connect(self._on_melody_suggestion)
+        self._tempo.valueChanged.connect(self._schedule_soundfont_preload)
+        self._soundfont_combo.currentIndexChanged.connect(self._on_soundfont_combo_changed)
+
+    def _refresh_soundfont_combo(self, *, block_signals: bool = False) -> None:
+        choices = enumerate_soundfont_choices()
+        saved = selected_soundfont()
+        if block_signals:
+            self._soundfont_combo.blockSignals(True)
+        self._soundfont_combo.clear()
+        select_idx = 0
+        for i, ch in enumerate(choices):
+            self._soundfont_combo.addItem(ch.label, ch.key)
+            if ch.key == saved or (
+                saved and key_to_soundfont_path(saved) == ch.path
+            ):
+                select_idx = i
+        if choices and not saved:
+            preferred = _preferred_soundfont_choice(choices)
+            select_idx = next(
+                (i for i, ch in enumerate(choices) if ch.key == preferred.key),
+                0,
+            )
+        if choices:
+            self._soundfont_combo.setCurrentIndex(select_idx)
+            if not saved:
+                apply_soundfont_selection(choices[select_idx].key)
+        if block_signals:
+            self._soundfont_combo.blockSignals(False)
+
+    def _on_soundfont_combo_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        key = self._soundfont_combo.itemData(index)
+        if not key:
+            return
+        path = apply_soundfont_selection(str(key))
+        if path is None:
+            return
+        name = self._soundfont_combo.currentText()
+        self.statusBar().showMessage(f"音源: {name}", 4000)
+        if self._work_flat is not None:
+            self._schedule_soundfont_preload()
+
+    def _cancel_soundfont_preload(self) -> None:
+        self._preload_debounce.stop()
+        w = self._preload_worker
+        if w is not None and w.isRunning():
+            w.requestInterruption()
+            w.wait(3000)
+        self._preload_worker = None
+
+    def _schedule_soundfont_preload(self) -> None:
+        if self._work_flat is None:
+            return
+        self._preload_debounce.start()
+
+    def _start_soundfont_preload(self) -> None:
+        if self._work_flat is None:
+            return
+        self._cancel_soundfont_preload()
+        tl = build_playback_timeline(self._work_flat)
+        if not self._note_events and not tl:
+            return
+        self.statusBar().showMessage("再生音声を準備しています…", 0)
+        self._preload_worker = SoundfontPreloadWorker(
+            self._note_events,
+            tl,
+            self._tempo.value(),
+            self,
+        )
+        self._preload_worker.completed.connect(self._on_soundfont_preload_done)
+        self._preload_worker.finished.connect(self._on_soundfont_preload_finished)
+        self._preload_worker.start()
+
+    def _on_soundfont_preload_done(self, ok: bool) -> None:
+        if ok and self._work_flat is not None:
+            self.statusBar().showMessage("再生音声の準備が完了しました", 5000)
+        elif self._work_flat is not None:
+            self.statusBar().showMessage(
+                "再生音声の事前生成に失敗しました（再生時に再試行します）",
+                8000,
+            )
+
+    def _on_soundfont_preload_finished(self) -> None:
+        self._preload_worker = None
 
     def _populate_recent_menu(self) -> None:
         self._recent_menu.clear()
@@ -669,6 +770,9 @@ class MainWindow(QMainWindow):
         elif not dlg.fullscreen_default() and self.isFullScreen():
             self._exit_fullscreen()
         self._toggle_assist_panel(dlg.assist_visible())
+        self._refresh_soundfont_combo(block_signals=True)
+        if self._work_flat is not None:
+            self._schedule_soundfont_preload()
 
     def _current_snapshot(self) -> TimelineSnapshot:
         return TimelineSnapshot(tuple(self._row_tuples()), tuple(self._row_ql))
@@ -855,8 +959,16 @@ class MainWindow(QMainWindow):
         self._btn_export_report.setEnabled(on)
         self._btn_play.setEnabled(on)
         self._btn_stop.setEnabled(on)
+        self._tempo.blockSignals(True)
         self._tempo.setEnabled(on)
+        self._tempo.blockSignals(False)
+        self._soundfont_combo.setEnabled(True)
+        self._refresh_soundfont_combo(block_signals=True)
         self._update_undo_actions()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._refresh_soundfont_combo(block_signals=True)
 
     def _roman_for_row_element(self, el) -> str:
         return functional_label(el, self._detected_key)
@@ -1278,19 +1390,37 @@ class MainWindow(QMainWindow):
     def play_transport(self) -> None:
         if self._work_flat is None:
             return
+        from midi_lab.core.soundfont_player import PlaybackSetupError, ensure_playback_ready
+
+        try:
+            ensure_playback_ready()
+        except PlaybackSetupError as e:
+            QMessageBox.warning(self, "再生の準備", str(e))
+            return
         self.stop_transport()
         tl = build_playback_timeline(self._work_flat)
-        if not tl:
+        if not tl and not self._note_events:
             QMessageBox.information(self, "再生", "再生できる音符がありません。")
             return
-        self._playback = PlaybackThread(tl, self._tempo.value(), self)
+        self._playback = PlaybackThread(
+            tl,
+            self._tempo.value(),
+            note_events=self._note_events if self._note_events else None,
+            parent=self,
+        )
         self._playback.highlight_row.connect(self._on_playback_highlight_row)
         self._playback.position_changed.connect(self._on_playback_position)
         self._playback.midi_message.connect(self._on_playback_midi_message)
         self._playback.mode_changed.connect(self._on_playback_mode)
+        self._playback.preparing.connect(self._on_playback_preparing)
+        self._playback.setup_error.connect(
+            lambda msg: QMessageBox.warning(self, "再生", msg)
+        )
         self._playback.finished_playback.connect(self._on_playback_done)
         self._btn_play.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        if hasattr(self, "_visualizer_panel") and self._visualizer_panel._events:
+            self._visualizer_panel.set_playback_active(True)
         self._playback.start()
 
     def _on_playback_highlight_row(self, row: int) -> None:
@@ -1304,7 +1434,9 @@ class MainWindow(QMainWindow):
         self.table.selectRow(row)
         beat_item = self.table.item(row, COL_BEAT)
         if beat_item is not None:
-            self.table.scrollToItem(beat_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+            self.table.scrollToItem(
+                beat_item, QAbstractItemView.ScrollHint.EnsureVisible
+            )
         if row < len(self._row_ql):
             it = self.table.item(row, COL_LABEL)
             if it:
@@ -1328,13 +1460,42 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_visualizer_panel"):
             self._visualizer_panel.forward_playback_midi(status, data1, data2)
 
+    def _on_playback_preparing(self, active: bool) -> None:
+        if active:
+            self.statusBar().showMessage("音声を準備しています（SoundFont）…", 0)
+        elif self._playback is None or not self._playback.isRunning():
+            pass
+
+    def _disconnect_playback_signals(self, thread: PlaybackThread) -> None:
+        for sig, slot in (
+            (thread.highlight_row, self._on_playback_highlight_row),
+            (thread.position_changed, self._on_playback_position),
+            (thread.midi_message, self._on_playback_midi_message),
+            (thread.mode_changed, self._on_playback_mode),
+            (thread.preparing, self._on_playback_preparing),
+            (thread.finished_playback, self._on_playback_done),
+        ):
+            try:
+                sig.disconnect(slot)
+            except TypeError:
+                pass
+
     def _on_playback_mode(self, mode: str) -> None:
+        ch_info = ""
+        if self._note_events and self._playback and self._playback._channel_programs:
+            from midi_lab.core.instruments import program_display_name
+
+            parts = [
+                f"Ch{ch}:{program_display_name(prog)}"
+                for ch, prog in sorted(self._playback._channel_programs.items())
+            ]
+            ch_info = " [" + ", ".join(parts[:6]) + ("…" if len(parts) > 6 else "") + "]"
+        sf_name = self._soundfont_combo.currentText() if hasattr(self, "_soundfont_combo") else ""
+        sf_part = f" ({sf_name})" if sf_name else ""
         msgs = {
-            "midi": "再生中 — MIDI デバイス",
-            "software": "再生中 — ソフトウェア音源",
-            "wave": "再生中 — Windows 波形出力",
-            "beep": "再生中 — システムビープ",
-            "silent": "再生中 — 音声なし（鍵盤のみ）",
+            "soundfont": f"再生中 — SoundFont{sf_part}{ch_info}",
+            "wave": "再生中 — Windows 波形出力（SoundFont）",
+            "silent": "再生中 — 音声なし（表示のみ）",
         }
         self.statusBar().showMessage(msgs.get(mode, "再生中…"), 0)
 
@@ -1350,10 +1511,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{self._current_path.name} — 再生終了", 8000)
 
     def stop_transport(self) -> None:
-        if self._playback is not None:
-            self._playback.requestInterruption()
-            stop_audio_output()
-            self._playback.wait(3000)
+        pb = self._playback
+        if pb is not None:
+            self._disconnect_playback_signals(pb)
+            pb.request_stop()
+            pb.wait(5000)
         self._playback = None
         self._playback_highlighting = False
         if hasattr(self, "_visualizer_panel"):
@@ -1365,6 +1527,7 @@ class MainWindow(QMainWindow):
     def load_file(self, path: str) -> None:
         if self._load_worker is not None and self._load_worker.isRunning():
             return
+        self._cancel_soundfont_preload()
         self._stop_analysis_build()
         self.stop_transport()
         name = Path(path).name
@@ -1399,7 +1562,10 @@ class MainWindow(QMainWindow):
             self._note_events = list(payload.note_events)
             self._edit_history.clear()
             self._dirty = False
+            self._tempo.blockSignals(True)
             self._tempo.setValue(payload.bpm)
+            self._tempo.blockSignals(False)
+            self._refresh_soundfont_combo(block_signals=True)
             add_recent_file(payload.path)
             self._fill_table_from_work()
             self._chord_list.clear()
@@ -1425,6 +1591,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "表示エラー", traceback.format_exc())
 
     def _reset_session(self) -> None:
+        self._cancel_soundfont_preload()
         self._stop_analysis_build()
         self._edit_history.clear()
         self._dirty = False

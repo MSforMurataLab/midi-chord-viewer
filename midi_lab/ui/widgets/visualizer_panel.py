@@ -267,6 +267,7 @@ class VisualizerPanel(QWidget):
             return
         if t_sec < 0:
             self.set_playback_active(False)
+            self._canvas.update()
             return
         self.set_playback_active(True)
         e = self._engine()

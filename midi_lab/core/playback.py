@@ -1,20 +1,29 @@
 # -*- coding: utf-8 -*-
-"""MIDI 再生 — 絶対時刻スケジュール / ソフトウェアはタイムライン一括ミックス。"""
+"""MIDI 再生 — SoundFont（FluidSynth）のみ。"""
 from __future__ import annotations
 
 import sys
 import tempfile
-import threading
 import time
 import wave
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-try:
-    import mido
-except ImportError:
-    mido = None  # type: ignore
+from midi_lab.core.playback_notes import (
+    midi_events_from_schedule,
+    schedule_duration_sec,
+)
+from midi_lab.core.playback_schedule import build_playback_schedule
+from midi_lab.core.soundfont_player import (
+    PlaybackSetupError,
+    is_render_cached,
+    render_soundfont_buffer,
+)
+
+if TYPE_CHECKING:
+    from midi_lab.core.note_events import NoteEvent
 
 try:
     import numpy as np
@@ -27,10 +36,10 @@ except ImportError:
     sd = None  # type: ignore
 
 SAMPLE_RATE = 44100
+_TICK_SLEEP = 0.02
 
 
 def stop_audio_output() -> None:
-    """再生を即座に止める（UI の停止ボタンからも呼ぶ）。"""
     if sd is not None:
         try:
             sd.stop()
@@ -49,29 +58,10 @@ def _tempo_spq(tempo: int) -> float:
     return 60.0 / float(max(40, min(220, tempo)))
 
 
-def _midi_to_freq(midi: int) -> float:
-    return 440.0 * (2.0 ** ((midi - 69) / 12.0))
-
-
-def _note_envelope(n_samples: int, sample_rate: int) -> np.ndarray:
-    t = np.arange(n_samples, dtype=np.float32) / sample_rate
-    seg_len = n_samples / sample_rate
-    attack = min(0.015, seg_len * 0.12)
-    release = min(0.04, seg_len * 0.18)
-    env = np.ones(n_samples, dtype=np.float32)
-    na = max(1, int(attack * sample_rate))
-    env[:na] = np.linspace(0.0, 1.0, na, dtype=np.float32)
-    nr = max(1, int(release * sample_rate))
-    if n_samples > nr:
-        env[-nr:] = np.linspace(1.0, 0.0, nr, dtype=np.float32)
-    return env
-
-
 def build_playback_marks(
     timeline: list[tuple[float, float, tuple[int, ...]]],
     tempo: int,
 ) -> list[tuple[int, float, float]]:
-    """各行インデックスと開始・終了時刻（秒）。"""
     spq = _tempo_spq(tempo)
     marks: list[tuple[int, float, float]] = []
     for row, (off, ql, pitches) in enumerate(timeline):
@@ -83,57 +73,11 @@ def build_playback_marks(
     return marks
 
 
-def render_timeline_buffer(
-    timeline: list[tuple[float, float, tuple[int, ...]]],
-    tempo: int,
-    sample_rate: int = SAMPLE_RATE,
-):
-    if np is None or not timeline:
-        return None, sample_rate, []
-
-    spq = _tempo_spq(tempo)
-    marks = build_playback_marks(timeline, tempo)
-    if not marks:
-        return None, sample_rate, []
-
-    end_sec = max(end for _, _, end in marks) + 0.15
-    n = int(end_sec * sample_rate) + 1
-    buf = np.zeros(n, dtype=np.float32)
-
-    for off, ql, pitches in timeline:
-        ps = {int(p) for p in pitches}
-        if not ps:
-            continue
-        start = off * spq
-        end = (off + ql) * spq
-        i0 = int(start * sample_rate)
-        i1 = min(n, int(end * sample_rate))
-        if i1 <= i0:
-            continue
-        seg_n = i1 - i0
-        env = _note_envelope(seg_n, sample_rate)
-        t = np.arange(seg_n, dtype=np.float32) / sample_rate
-        seg = np.zeros(seg_n, dtype=np.float32)
-        amp = 0.24 / max(len(ps), 1)
-        for p in ps:
-            seg += amp * np.sin(2.0 * np.pi * _midi_to_freq(p) * t).astype(np.float32) * env
-        buf[i0:i1] += seg
-
-    peak = float(np.max(np.abs(buf)))
-    if peak > 0.98:
-        buf *= 0.98 / peak
-    return buf, sample_rate, marks
-
-
-def _sleep_until(target_time: float, stop_check) -> bool:
-    """target_time まで待つ。stop_check() が True なら False を返す（中断）。"""
-    while True:
-        if stop_check():
-            return False
-        remaining = target_time - time.perf_counter()
-        if remaining <= 0:
-            return True
-        time.sleep(min(0.02, remaining))
+def _active_harmony_row(marks: list[tuple[int, float, float]], t_sec: float) -> int:
+    for row, start, end in marks:
+        if start <= t_sec < end:
+            return row
+    return -1
 
 
 def _play_buffer_winsound_async(buf, sample_rate: int, stop_check) -> bool:
@@ -160,7 +104,7 @@ def _play_buffer_winsound_async(buf, sample_rate: int, stop_check) -> bool:
                 except OSError:
                     pass
                 return True
-            time.sleep(0.02)
+            time.sleep(_TICK_SLEEP)
         try:
             path.unlink(missing_ok=True)
         except OSError:
@@ -170,223 +114,176 @@ def _play_buffer_winsound_async(buf, sample_rate: int, stop_check) -> bool:
         return False
 
 
-def _open_mido_port():
-    if mido is None:
-        return None
-    try:
-        names = mido.get_output_names()
-    except Exception:
-        return None
-    if not names:
-        return None
-    for pref in (
-        "Microsoft GS",
-        "Microsoft MIDI",
-        "VirtualMIDISynth",
-        "loopMIDI",
-        "LoopBe",
-        "Fluid",
-        "Synth",
-    ):
-        for n in names:
-            if any(p.lower() in n.lower() for p in (pref,)):
-                try:
-                    return mido.open_output(n)
-                except Exception:
-                    continue
-    try:
-        return mido.open_output(names[0])
-    except Exception:
-        return None
-
-
-def _midi_schedule(
-    timeline: list[tuple[float, float, tuple[int, ...]]], tempo: int
-) -> list[tuple[float, str, int]]:
-    spq = _tempo_spq(tempo)
-    events: list[tuple[float, str, int]] = []
-    for off, ql, pitches in timeline:
-        t_on = off * spq
-        t_off = (off + ql) * spq
-        for p in pitches:
-            pi = int(p)
-            events.append((t_on, "on", pi))
-            events.append((t_off, "off", pi))
-    events.sort(key=lambda e: (e[0], 0 if e[1] == "on" else 1, e[2]))
-    return events
-
-
 class PlaybackThread(QThread):
-    """highlight_row: タイムライン行番号（-1 でハイライト解除）。"""
-
     highlight_row = pyqtSignal(int)
     position_changed = pyqtSignal(float)
     mode_changed = pyqtSignal(str)
     finished_playback = pyqtSignal()
-    midi_message = pyqtSignal(int, int, int)  # status, data1, data2
+    setup_error = pyqtSignal(str)
+    preparing = pyqtSignal(bool)
+    midi_message = pyqtSignal(int, int, int)
 
-    def __init__(self, timeline: list[tuple[float, float, tuple[int, ...]]], tempo: int = 120, parent=None):
+    def __init__(
+        self,
+        harmony_timeline: list[tuple[float, float, tuple[int, ...]]],
+        tempo: int = 120,
+        note_events: list[NoteEvent] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
-        self.timeline = timeline
+        self.harmony_timeline = harmony_timeline
+        self.note_events = list(note_events) if note_events else []
         self.tempo = tempo
         self._marks: list[tuple[int, float, float]] = []
+        self._note_schedule: list = []
+        self._channel_programs: dict[int, int] = {}
+        self._render_proc = None
+
+        self._note_schedule, self._channel_programs = build_playback_schedule(
+            self.note_events,
+            self.harmony_timeline,
+            tempo,
+        )
 
     def _stopped(self) -> bool:
         return self.isInterruptionRequested()
 
-    def _run_position_emitter(self, t0: float, duration_sec: float) -> None:
-        """ビジュアライザ同期用 — 経過秒を約 20Hz で通知。"""
-        while not self._stopped():
-            elapsed = time.perf_counter() - t0
-            if elapsed >= duration_sec:
-                self.position_changed.emit(duration_sec)
-                break
-            self.position_changed.emit(elapsed)
-            time.sleep(0.05)
-        self.position_changed.emit(-1.0)
+    def request_stop(self) -> None:
+        """UI からの停止 — レンダリング subprocess も打ち切る。"""
+        self.requestInterruption()
+        stop_audio_output()
+        proc = self._render_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
-    def _run_highlights_synced(self, marks: list[tuple[int, float, float]], t0: float) -> None:
-        for row, start, end in marks:
-            if not _sleep_until(t0 + start, self._stopped):
-                return
-            self.highlight_row.emit(row)
-            if not _sleep_until(t0 + end, self._stopped):
-                self.highlight_row.emit(-1)
-                return
-            self.highlight_row.emit(-1)
+    def _playback_duration(self) -> float:
+        if self._note_schedule:
+            return schedule_duration_sec(self._note_schedule)
+        if self._marks:
+            return self._marks[-1][2]
+        return 0.0
 
-    def _run_software(self, buf, sr) -> str:
-        t0 = time.perf_counter()
-        duration = self._marks[-1][2] if self._marks else 0.0
-        hl = threading.Thread(
-            target=self._run_highlights_synced, args=(self._marks, t0), daemon=True
-        )
-        pos = threading.Thread(
-            target=self._run_position_emitter, args=(t0, duration), daemon=True
-        )
-        hl.start()
-        pos.start()
-        viz = threading.Thread(
-            target=self._run_midi_visualizer_sync,
-            args=(t0, duration),
-            daemon=True,
-        )
-        viz.start()
-
-        mode = "silent"
+    def _start_audio(self, buf, sr: int) -> str:
         if sd is not None:
             try:
                 sd.play(buf, sr, blocking=False)
-                stream = sd.get_stream()
-                while stream and stream.active:
-                    if self._stopped():
-                        stop_audio_output()
-                        break
-                    time.sleep(0.02)
-                if not self._stopped():
-                    mode = "software"
+                return "soundfont"
             except Exception:
                 stop_audio_output()
-        if mode == "silent" and not self._stopped():
-            if _play_buffer_winsound_async(buf, sr, self._stopped):
-                mode = "wave"
+        if _play_buffer_winsound_async(buf, sr, self._stopped):
+            return "wave"
+        return "silent"
 
-        hl.join(timeout=max(1.0, duration + 1.0))
-        pos.join(timeout=max(1.0, duration + 1.0))
-        viz.join(timeout=max(1.0, duration + 1.0))
-        return mode
+    def _audio_still_playing(self) -> bool:
+        if sd is None:
+            return False
+        try:
+            stream = sd.get_stream()
+            return bool(stream and stream.active)
+        except Exception:
+            return False
 
-    def _run_midi(self, port) -> None:
-        events = _midi_schedule(self.timeline, self.tempo)
-        wall = 0.0
+    def _run_playback_loop(self, duration: float, midi_events: list) -> None:
+        """音声・ハイライト・ビジュアライザを単一ループで同期（停止可能）。"""
         t0 = time.perf_counter()
-        duration = self._marks[-1][2] if self._marks else 0.0
-        hl = threading.Thread(
-            target=self._run_highlights_synced, args=(self._marks, t0), daemon=True
-        )
-        pos = threading.Thread(
-            target=self._run_position_emitter, args=(t0, duration), daemon=True
-        )
-        hl.start()
-        pos.start()
-        viz = threading.Thread(
-            target=self._run_midi_visualizer_sync,
-            args=(t0, duration),
-            daemon=True,
-        )
-        viz.start()
+        active_row = -2
+        midi_idx = 0
+        mode = "silent"
 
-        for t_ev, kind, pitch in events:
-            if self._stopped():
+        while not self._stopped():
+            t = time.perf_counter() - t0
+            if t >= duration:
+                self.position_changed.emit(duration)
                 break
-            if t_ev > wall:
-                if not _sleep_until(t0 + t_ev, self._stopped):
+
+            self.position_changed.emit(t)
+
+            if self._marks:
+                row = _active_harmony_row(self._marks, t)
+                if row != active_row:
+                    active_row = row
+                    self.highlight_row.emit(row)
+
+            while midi_idx < len(midi_events) and midi_events[midi_idx][0] <= t:
+                _, kind, pitch, vel, ch = midi_events[midi_idx]
+                midi_idx += 1
+                if self._stopped():
                     break
-            wall = t_ev
-            if kind == "on":
-                port.send(mido.Message("note_on", note=pitch, velocity=96))
-                self.midi_message.emit(0x90, pitch, 96)
-            else:
-                port.send(mido.Message("note_off", note=pitch, velocity=0))
-                self.midi_message.emit(0x80, pitch, 0)
+                if kind == "on":
+                    self.midi_message.emit(0x90 | ch, pitch, vel)
+                else:
+                    self.midi_message.emit(0x80 | ch, pitch, 0)
 
-        hl.join(timeout=max(1.0, duration + 1.0))
-        pos.join(timeout=max(1.0, duration + 1.0))
-        viz.join(timeout=max(1.0, duration + 1.0))
-
-    def _run_midi_visualizer_sync(self, t0: float, duration: float) -> None:
-        """ビジュアライザ用 — スケジュールどおり note on/off を通知。"""
-        events = _midi_schedule(self.timeline, self.tempo)
-        for t_ev, kind, pitch in events:
-            if self._stopped():
+            if mode == "soundfont" and not self._audio_still_playing():
                 break
-            if not _sleep_until(t0 + t_ev, self._stopped):
-                break
-            if kind == "on":
-                self.midi_message.emit(0x90, pitch, 96)
-            else:
-                self.midi_message.emit(0x80, pitch, 0)
 
-    def _run_timeline_only(self) -> None:
-        """音声バッファなし — ハイライトとビジュアライザ位置のみ同期。"""
-        if not self._marks:
-            return
-        t0 = time.perf_counter()
-        duration = self._marks[-1][2]
-        hl = threading.Thread(
-            target=self._run_highlights_synced, args=(self._marks, t0), daemon=True
+            time.sleep(_TICK_SLEEP)
+
+        if active_row >= 0:
+            self.highlight_row.emit(-1)
+        self.position_changed.emit(-1.0)
+
+    def _run_timeline_only(self, duration: float) -> None:
+        midi_events = (
+            midi_events_from_schedule(self._note_schedule) if self._note_schedule else []
         )
-        pos = threading.Thread(
-            target=self._run_position_emitter, args=(t0, duration), daemon=True
-        )
-        hl.start()
-        pos.start()
-        hl.join(timeout=max(1.0, duration + 1.0))
-        pos.join(timeout=max(1.0, duration + 1.0))
+        self._run_playback_loop(duration, midi_events)
 
     def run(self) -> None:
-        self._marks = build_playback_marks(self.timeline, self.tempo)
-        port = _open_mido_port()
+        self._marks = build_playback_marks(self.harmony_timeline, self.tempo)
+        duration = self._playback_duration()
+        mode = "silent"
+
         try:
-            if port is not None:
-                self.mode_changed.emit("midi")
-                self._run_midi(port)
-            else:
-                buf, sr, _ = render_timeline_buffer(self.timeline, self.tempo)
-                if buf is None:
-                    self.mode_changed.emit("silent")
-                    self._run_timeline_only()
-                else:
-                    mode = self._run_software(buf, sr)
-                    self.mode_changed.emit(mode if mode != "silent" else "silent")
+            if not self._note_schedule:
+                self.mode_changed.emit("silent")
+                if self._marks or duration > 0:
+                    self._run_timeline_only(duration)
+                return
+
+            need_render = not is_render_cached(
+                self._note_schedule, self._channel_programs, self.tempo, SAMPLE_RATE
+            )
+            if need_render:
+                self.preparing.emit(True)
+            buf, sr = render_soundfont_buffer(
+                self._note_schedule,
+                self._channel_programs,
+                self.tempo,
+                SAMPLE_RATE,
+                stop_check=self._stopped,
+                render_proc_holder=lambda p: setattr(self, "_render_proc", p),
+            )
+            if need_render:
+                self.preparing.emit(False)
+
+            if self._stopped():
+                return
+
+            if buf is None:
+                self.setup_error.emit("SoundFont レンダリング結果が空です。")
+                self._run_timeline_only(duration)
+                return
+
+            midi_events = midi_events_from_schedule(self._note_schedule)
+            mode = self._start_audio(buf, sr)
+            if mode != "silent":
+                self.mode_changed.emit(mode)
+            self._run_playback_loop(duration, midi_events)
+
+        except PlaybackSetupError as e:
+            self.preparing.emit(False)
+            self.setup_error.emit(str(e))
+            if not self._stopped() and (self._marks or duration > 0):
+                self._run_timeline_only(duration)
         finally:
-            if port:
-                try:
-                    for p in range(128):
-                        port.send(mido.Message("note_off", note=p, velocity=0))
-                    port.close()
-                except Exception:
-                    pass
+            self.preparing.emit(False)
             stop_audio_output()
             self.highlight_row.emit(-1)
+            self.position_changed.emit(-1.0)
+            if mode != "silent":
+                self.mode_changed.emit("silent")
             self.finished_playback.emit()

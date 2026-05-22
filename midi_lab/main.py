@@ -9,13 +9,13 @@ from midi_lab.bootstrap import bootstrap_frozen
 
 bootstrap_frozen()
 
-# matplotlib バックエンドは必ずメインスレッド・QApplication 直後に設定
+# PyQt6 を matplotlib より先に読み込む（QtAgg が誤った DLL を掴むのを防ぐ）
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import QApplication, QMessageBox
+
 import matplotlib
 
 matplotlib.use("QtAgg")
-
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from midi_lab.diagnostics import log, log_stack
 from midi_lab.resources import application_icon
@@ -32,7 +32,16 @@ def _install_excepthook() -> None:
         except Exception:
             pass
 
+    def _thread_hook(args):
+        text = "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        )
+        log(f"THREAD UNHANDLED:\n{text}")
+
     sys.excepthook = _hook
+    import threading
+
+    threading.excepthook = _thread_hook
 
 
 def _cli_message(title: str, message: str, success: bool) -> None:

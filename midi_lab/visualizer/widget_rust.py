@@ -84,7 +84,7 @@ class RustVisualizerCanvas(QWidget):
         durations = [float(e.quarter_length) for e in events]
         midis = [int(e.midi) for e in events]
         velocities = [int(e.velocity) for e in events]
-        channels = [int(e.part_index) for e in events]
+        channels = [int(e.channel) for e in events]
         self._engine.load_notes(onsets, durations, midis, velocities, channels)
         self._t_ql = 0.0
         self._sync_transport()

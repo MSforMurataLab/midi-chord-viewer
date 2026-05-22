@@ -18,3 +18,7 @@ Thumbs.db
 rust/**/target/
 build_log.txt
 =5.10.0
+
+# GitHub 100MB 制限を超える SoundFont（ローカル配置・ビルド同梱用）
+assets/soundfonts/FluidR3_GM.sf2
+assets/**/*.pdb

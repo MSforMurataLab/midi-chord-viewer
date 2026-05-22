@@ -22,12 +22,80 @@ datas_io, binaries_io, hidden_io = collect_all("imageio_ffmpeg")
 datas_imageio_meta = copy_metadata("imageio")
 binaries_sd = collect_dynamic_libs("sounddevice")
 _app_assets = [("image.png", ".")]
+_spec_dir = Path(SPECPATH)
+_sf_datas: list = []
+# FluidSynth は datas のみ（binaries にすると依存 DLL が _internal 直下に展開され Qt と競合する）
+_fs_bin = _spec_dir / "assets" / "fluidsynth" / "bin"
+if _fs_bin.is_dir():
+    for _f in _fs_bin.iterdir():
+        if _f.is_file():
+            _sf_datas.append((str(_f), "assets/fluidsynth/bin"))
+_sf_dir = _spec_dir / "assets" / "soundfonts"
+if _sf_dir.is_dir():
+    for _f in _sf_dir.rglob("*.sf2"):
+        if _f.is_file():
+            _rel_parent = _f.parent.relative_to(_sf_dir)
+            _dest = (
+                str(Path("assets/soundfonts") / _rel_parent)
+                if str(_rel_parent) != "."
+                else "assets/soundfonts"
+            )
+            _sf_datas.append((str(_f), _dest))
+
+# ビルド時に依存解析で _internal 直下へコピーされる FluidSynth DLL（Qt と競合）
+_FS_DLL_NAMES = {
+    "libfluidsynth-3.dll",
+    "libglib-2.0-0.dll",
+    "libgthread-2.0-0.dll",
+    "libgobject-2.0-0.dll",
+    "libgomp-1.dll",
+    "libgcc_s_sjlj-1.dll",
+    "libsndfile-1.dll",
+    "libstdc++-6.dll",
+    "libintl-8.dll",
+    "libwinpthread-1.dll",
+    "libinstpatch-2.dll",
+    "fluidsynth.exe",
+}
+
+
+def _drop_stray_fluidsynth_binaries(binaries):
+    kept = []
+    for entry in binaries:
+        dest = str(entry[0]).replace("\\", "/")
+        src = str(entry[1] if len(entry) > 1 else "").replace("\\", "/")
+        name = Path(dest).name.lower()
+        if name in _FS_DLL_NAMES:
+            if "assets/fluidsynth" in dest.lower():
+                kept.append(entry)
+            continue
+        if "fluidsynth" in src.lower() and name.endswith(".dll"):
+            continue
+        kept.append(entry)
+    return kept
+
+
+def _drop_mismatched_icu_binaries(binaries):
+    """Anaconda ICU 73 は Qt6Core と ABI 不一致（UCNV_*_73）— 同梱しない。"""
+    kept = []
+    for entry in binaries:
+        name = Path(entry[0]).name.lower()
+        if not name.startswith("icu") or not name.endswith(".dll"):
+            kept.append(entry)
+            continue
+        src = str(entry[1] if len(entry) > 1 else "").replace("\\", "/").lower()
+        if "pyqt6" in src or "qt6" in src:
+            kept.append(entry)
+            continue
+        continue
+    return kept
+
 
 a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=binaries_m21 + binaries_mpl + binaries_io + binaries_sd + _binaries_midi_viz,
-    datas=datas_m21 + datas_mpl + datas_io + datas_imageio_meta + _app_assets,
+    datas=datas_m21 + datas_mpl + datas_io + datas_imageio_meta + _app_assets + _sf_datas,
     hiddenimports=hidden_m21
     + hidden_mpl
     + hidden_io
@@ -83,6 +151,10 @@ a = Analysis(
         "midi_lab.visualizer.engine",
         "midi_lab.visualizer.export",
         "midi_lab.visualizer.ffmpeg_util",
+        "midi_lab.core.soundfont_player",
+        "midi_lab.core.soundfont_midi",
+        "midi_lab.core.soundfont_preload",
+        "midi_lab.core.playback_schedule",
         "midi_lab.visualizer.midi_input",
         "midi_lab.visualizer.styles",
         "midi_viz",
@@ -100,13 +172,16 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(_spec_dir / "runtime_hooks" / "pyi_rth_midi_lab_dll.py")],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
+
+a.binaries = _drop_stray_fluidsynth_binaries(a.binaries)
+a.binaries = _drop_mismatched_icu_binaries(a.binaries)
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -119,7 +194,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -135,7 +210,6 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
-    upx_exclude=[],
+    upx=False,
     name="MIDIChordViewer",
 )

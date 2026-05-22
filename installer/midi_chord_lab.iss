@@ -6,7 +6,7 @@
 #endif
 
 #define MyAppName "MIDI Chord Lab"
-#define MyAppVersion "2.14.0"
+#define MyAppVersion "2.14.6"
 #define MyAppPublisher "MSforMurataLab"
 #define MyAppURL "https://github.com/MSforMurataLab/midi-chord-viewer"
 #define MyAppExeName "MIDIChordViewer.exe"
@@ -25,6 +25,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=..\dist\installer
 OutputBaseFilename=MIDIChordLab_Setup_{#MyAppVersion}
+; 2.14.0 からの DLL 配置変更を確実に反映するため AppId は維持しファイルは全上書き
 SetupIconFile=..\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
@@ -46,6 +47,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "デスクトップにショートカットを作成する"; GroupDescription: "追加のショートカット:"
 Name: "midiassoc"; Description: ".mid / .midi を MIDI Chord Lab で開く（現在のユーザー）"; GroupDescription: "ファイル関連付け:"
+
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\assets"
 
 [Files]
 Source: "..\dist\MIDIChordViewer\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

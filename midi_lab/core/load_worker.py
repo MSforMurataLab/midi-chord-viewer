@@ -14,8 +14,9 @@ _PROGRESS_YIELD_MS = 15
 from midi_lab.core.harmony import detect_key_for_score
 from midi_lab.core.midi_tempo import detect_score_bpm
 from midi_lab.core.note_events import NoteEvent, collect_note_events
-from midi_lab.core.score import build_flat_work_stream, load_score
+from midi_lab.core.score import build_flat_work_stream, build_playback_timeline, load_score
 from midi_lab.core.settings import default_tempo
+from midi_lab.core.soundfont_preload import try_preload_playback_audio
 
 
 @dataclass
@@ -56,6 +57,18 @@ class MidiLoadWorker(QThread):
             if self.isInterruptionRequested():
                 return
             bpm = detect_score_bpm(score, default_tempo())
+            if self.isInterruptionRequested():
+                return
+            self.progress.emit("再生音声を準備しています（SoundFont）…")
+            QThread.msleep(_PROGRESS_YIELD_MS)
+            harmony_tl = build_playback_timeline(work)
+            if not self.isInterruptionRequested():
+                try_preload_playback_audio(
+                    list(notes),
+                    harmony_tl,
+                    bpm,
+                    stop_check=self.isInterruptionRequested,
+                )
             payload = LoadedScore(
                 path=self._path,
                 score=score,

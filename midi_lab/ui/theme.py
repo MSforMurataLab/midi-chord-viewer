@@ -228,6 +228,35 @@ QSpinBox#SidebarTempo {{
 QSpinBox#SidebarTempo:disabled {{
     color: {t.TEXT_DIM};
 }}
+QLabel#SidebarSfHint {{
+    color: {t.TEXT_MUTED};
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+}}
+QComboBox#SidebarSoundFont {{
+    background: {t.BG_INPUT};
+    color: {t.TEXT_PRIMARY};
+    border: 1px solid {t.BORDER_DEFAULT};
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+}}
+QComboBox#SidebarSoundFont:disabled {{
+    color: {t.TEXT_DIM};
+}}
+QComboBox#SidebarSoundFont::drop-down {{
+    border: none;
+    width: 24px;
+}}
+QComboBox#SidebarSoundFont QAbstractItemView {{
+    background: {t.BG_ELEVATED};
+    color: {t.TEXT_PRIMARY};
+    border: 1px solid {t.BORDER_DEFAULT};
+    selection-background-color: {t.ACCENT_SOFT};
+    selection-color: {t.TEXT_PRIMARY};
+}}
 
 /* ── パネル ── */
 QFrame#PanelCard {{

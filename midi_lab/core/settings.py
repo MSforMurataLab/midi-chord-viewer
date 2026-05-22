@@ -60,3 +60,25 @@ def assist_panel_visible_default() -> bool:
 
 def set_assist_panel_visible_default(on: bool) -> None:
     _settings().setValue("assist_panel_visible", on)
+
+
+def selected_soundfont() -> str:
+    """選択中 SoundFont（soundfonts からの相対パス、または絶対パス）。"""
+    raw = _settings().value("selected_soundfont", "")
+    if raw:
+        return str(raw).strip()
+    legacy = _settings().value("soundfont_path", "")
+    return str(legacy).strip() if legacy else ""
+
+
+def set_selected_soundfont(key: str) -> None:
+    _settings().setValue("selected_soundfont", str(key).strip())
+
+
+def soundfont_path() -> str:
+    """後方互換 — selected_soundfont と同じ。"""
+    return selected_soundfont()
+
+
+def set_soundfont_path(path: str) -> None:
+    set_selected_soundfont(path)

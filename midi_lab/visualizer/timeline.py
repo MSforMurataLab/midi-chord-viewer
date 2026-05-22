@@ -36,7 +36,7 @@ class MidiTimeline:
                 duration_ql=max(float(e.quarter_length), 0.04),
                 midi=int(e.midi),
                 velocity=int(e.velocity),
-                channel=int(e.part_index),
+                channel=int(e.channel),
             )
             for e in events
         ]
